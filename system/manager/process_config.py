@@ -193,6 +193,9 @@ procs += [
 
   # tailscale remote access (keeps the daemon alive and publishes status for the settings UI)
   PythonProcess("tailscale", "sunnypilot.tailscale.manager", always_run, enabled=not PC, restart_if_crash=True),
+
+  # live CAN gauges (samples built-in state and decodes configured DBC signals)
+  PythonProcess("cangauges", "sunnypilot.cangauges.publisher", always_run, enabled=not PC, restart_if_crash=True),
 ]
 
 if os.path.exists("./github_runner.sh"):
