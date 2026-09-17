@@ -36,6 +36,7 @@ from aiohttp import web
 from cereal import car
 import cereal.messaging as messaging
 
+from openpilot.sunnypilot.cangauges import config as gauge_config
 from openpilot.sunnypilot.webdashcam import config, library
 
 HOST = "0.0.0.0"
@@ -188,7 +189,10 @@ main{padding:12px;max-width:900px;margin:0 auto;padding-bottom:96px}
       <h1>Dash Cam</h1>
       <div id="sub">Loading&hellip;</div>
     </div>
-    <a class="btn danger" href="/logout">Log out</a>
+    <span>
+      <a class="btn" href="/gauges">Gauges</a>
+      <a class="btn danger" href="/logout">Log out</a>
+    </span>
   </div>
 </header>
 <main>
@@ -343,6 +347,150 @@ button{width:100%;margin-top:14px;padding:14px;border-radius:10px;border:0;backg
 """
 
 
+GAUGES_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Gauges</title>
+<style>
+:root{--bg:#151515;--panel:#232323;--panel2:#2c2c2c;--text:#f2f2f2;--muted:#9aa0a6;--accent:#4a90d9}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+header{position:sticky;top:0;background:rgba(21,21,21,.95);padding:14px 16px;border-bottom:1px solid #2c2c2c;z-index:5}
+.hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:1100px;margin:0 auto}
+h1{font-size:20px;margin:0}h3{margin:0 0 10px}
+.btn{display:inline-block;padding:7px 12px;border-radius:9px;background:var(--panel2);
+color:var(--text);text-decoration:none;font-size:13px;border:1px solid #3a3a3a;cursor:pointer}
+.btn.pri{background:var(--accent);border-color:var(--accent)}
+.btn.danger{color:#ff9a8a;border-color:#5a2a2a}
+main{padding:14px;max-width:1100px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.tile{background:var(--panel);border-radius:12px;padding:12px 14px;border:1px solid #333}
+.tile .lbl{color:var(--muted);font-size:13px}
+.tile .val{font-size:34px;font-weight:700;margin-top:4px}
+.tile .unit{color:var(--muted);font-size:14px;margin-left:6px;font-weight:400}
+.track{height:10px;border-radius:6px;background:#3a3a3a;margin-top:10px;overflow:hidden}
+.fill{height:100%;background:var(--accent)}
+.off{opacity:.45}
+section{margin-top:22px;border-top:1px solid #2c2c2c;padding-top:16px}
+.row{display:flex;gap:8px;align-items:center;background:var(--panel);border-radius:10px;padding:8px 10px;margin-bottom:8px;flex-wrap:wrap}
+input,select{background:#1b1b1b;border:1px solid #3a3a3a;color:var(--text);border-radius:8px;padding:7px 9px;font-size:14px}
+input.sm{width:84px}
+#add{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<header><div class="hdr"><h1>Live Gauges</h1>
+  <span><a class="btn" href="/">Dash Cam</a> <a class="btn danger" href="/logout">Log out</a></span>
+</div></header>
+<main>
+  <div id="grid" class="grid"></div>
+  <section>
+    <h3>Configure</h3>
+    <div id="list"></div>
+    <div id="add">
+      <select id="source">
+        <option value="carState">carState</option>
+        <option value="carControl">carControl</option>
+        <option value="panda">panda</option>
+        <option value="device">device</option>
+        <option value="gps">gps</option>
+        <option value="can">can (DBC)</option>
+      </select>
+      <input id="key" list="catalog" placeholder="vEgo  or  ENGINE_RPM.ENGINE_RPM" style="min-width:300px"/>
+      <datalist id="catalog"></datalist>
+      <input id="label" placeholder="label"/>
+      <input id="unit" placeholder="unit" class="sm"/>
+      <input id="scale" placeholder="scale" value="1" class="sm"/>
+      <input id="min" placeholder="min" value="0" class="sm"/>
+      <input id="max" placeholder="max" value="1" class="sm"/>
+      <select id="style"><option>value</option><option>bar</option><option>arc</option></select>
+      <button class="btn" id="addbtn">Add</button>
+      <button class="btn pri" id="save">Save</button>
+    </div>
+    <p class="muted" id="msg"></p>
+    <p class="muted" id="hint"></p>
+  </section>
+</main>
+<script>
+const $=(s)=>document.querySelector(s);
+let cfg={gauges:[]};
+async function api(p,o){const r=await fetch(p,o);if(r.status===401){location.href="/login";throw new Error("auth");}return r.json();}
+function fmt(v){if(v===null||v===undefined)return"--";const a=Math.abs(v);return (a>=1000||a>=100)?v.toFixed(0):v.toFixed(1);}
+function renderValues(snap){
+  const gs=(snap&&snap.gauges)||[];
+  $("#grid").innerHTML=gs.map(g=>{
+    const val=(g.text!==null&&g.text!==undefined)?g.text:fmt(g.value);
+    const frac=(g.value!==null&&g.value!==undefined&&g.max>g.min)?Math.max(0,Math.min(1,(g.value-g.min)/(g.max-g.min))):0;
+    const bar=g.style==="value"?"":`<div class="track"><div class="fill" style="width:${(frac*100).toFixed(1)}%"></div></div>`;
+    return `<div class="tile ${g.ok?"":"off"}"><div class="lbl">${g.label}</div>
+      <div class="val">${val}<span class="unit">${g.unit||""}</span></div>${bar}</div>`;
+  }).join("");
+}
+function renderList(){
+  $("#list").innerHTML=cfg.gauges.map((g,i)=>`<div class="row">
+    <b style="min-width:120px">${g.label}</b>
+    <span class="muted">${g.source}:${g.key} x${g.scale} [${g.min}..${g.max}] ${g.style}</span>
+    <span style="flex:1"></span><button class="btn danger" onclick="del(${i})">Remove</button></div>`).join("");
+}
+window.del=(i)=>{cfg.gauges.splice(i,1);renderList();};
+function addGauge(){
+  const key=$("#key").value.trim();
+  if(!key){$("#msg").textContent="key required";return;}
+  cfg.gauges.push({id:key.replace(/[^A-Za-z0-9_]/g,"_"),label:$("#label").value||key,source:$("#source").value,
+    key:key,unit:$("#unit").value,scale:parseFloat($("#scale").value||"1"),
+    min:parseFloat($("#min").value||"0"),max:parseFloat($("#max").value||"1"),style:$("#style").value});
+  renderList();$("#key").value="";$("#label").value="";$("#msg").textContent="added (press Save)";
+}
+async function save(){
+  const r=await api("/api/gauges/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)});
+  if(r.config){cfg=r.config;renderList();}
+  $("#msg").textContent=r.ok?"saved":"save failed";
+}
+async function loop(){
+  try{const s=await api("/api/gauges");renderValues(s.values);}catch(e){}
+  setTimeout(loop,300);
+}
+(async()=>{
+  try{const c=await api("/api/gauges/catalog");
+    $("#catalog").innerHTML=c.map(x=>`<option value="${x.key}">${x.dbc} ${x.addr}</option>`).join("");
+    const bySrc={};for(const x of c){bySrc[x.dbc]=(bySrc[x.dbc]||0)+1;}
+    $("#hint").textContent="DBC signals available: "+Object.entries(bySrc).map(([k,v])=>k+" ("+v+")").join(", ");
+  }catch(e){}
+  $("#addbtn").onclick=addGauge;$("#save").onclick=save;
+  const s=await api("/api/gauges");cfg=s.config||cfg;renderList();renderValues(s.values);
+  loop();
+})();
+</script>
+</body></html>
+"""
+
+
+async def handle_gauges_page(_request: web.Request) -> web.Response:
+  return web.Response(text=GAUGES_HTML, content_type="text/html")
+
+
+async def handle_api_gauges(_request: web.Request) -> web.Response:
+  return web.json_response({"config": gauge_config.load(), "values": gauge_config.read_values()})
+
+
+async def handle_api_gauges_catalog(_request: web.Request) -> web.Response:
+  return web.json_response(gauge_config.read_catalog())
+
+
+async def handle_api_gauges_config(request: web.Request) -> web.Response:
+  try:
+    data = await request.json()
+  except Exception:
+    return web.json_response({"error": "invalid json"}, status=400)
+  if not isinstance(data, dict) or not isinstance(data.get("gauges"), list):
+    return web.json_response({"error": "invalid config"}, status=400)
+  gauge_config.save(data)
+  return web.json_response({"ok": True, "config": gauge_config.load()})
+
+
 def _session_token() -> str | None:
   password = config.get_password()
   if not password:
@@ -359,8 +507,6 @@ def _login_html(error: str = "") -> str:
 async def auth_middleware(request: web.Request, handler):
   if not _request_allowed(request):
     return web.Response(status=403, text="Not available on this network.")
-  if not _is_parked():
-    return web.Response(status=403, text="Dash cam web server is only available while parked (gear P).")
   if request.path == "/favicon.ico":
     return web.Response(status=204)
   if request.path in ("/login", "/logout"):
@@ -429,6 +575,8 @@ async def handle_clips(request: web.Request) -> web.Response:
 
 
 async def handle_clip(request: web.Request) -> web.StreamResponse:
+  if not _is_parked():
+    raise web.HTTPForbidden(text="Downloads are only available while parked (gear P).")
   seg = request.match_info["seg"]
   camera = request.match_info["camera"]
   src = library.camera_path(seg, camera)
@@ -455,6 +603,8 @@ async def handle_clip(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_zip(request: web.Request) -> web.StreamResponse:
+  if not _is_parked():
+    raise web.HTTPForbidden(text="Downloads are only available while parked (gear P).")
   date = request.query.get("date", "")
   cams = [c for c in request.query.get("cams", "").split(",") if c in library.FOLDER_CAMERA]
   if not cams:
@@ -676,6 +826,10 @@ def main() -> None:
     web.get("/api/clips", handle_clips),
     web.get("/clip/{seg}/{camera}", handle_clip),
     web.get("/zip", handle_zip),
+    web.get("/gauges", handle_gauges_page),
+    web.get("/api/gauges", handle_api_gauges),
+    web.get("/api/gauges/catalog", handle_api_gauges_catalog),
+    web.post("/api/gauges/config", handle_api_gauges_config),
   ])
 
   cert, key = _ensure_cert()

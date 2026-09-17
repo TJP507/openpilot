@@ -11,8 +11,10 @@ from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import OnboardingWindow
 from openpilot.selfdrive.ui.body.layouts.onroad import BodyLayout
 
+_gauges_overlay = None
 if gui_app.sunnypilot_ui():
   from openpilot.selfdrive.ui.sunnypilot.layouts.settings.settings import SettingsLayoutSP as SettingsLayout
+  from openpilot.selfdrive.ui.sunnypilot.layouts import gauges_overlay as _gauges_overlay
 
 
 class MainState(IntEnum):
@@ -128,3 +130,6 @@ class MainLayout(Widget):
 
     content_rect = self._content_rect if self._sidebar.is_visible else self._rect
     self._layouts[self._current_mode].render(content_rect)
+
+    if self._current_mode == MainState.ONROAD and _gauges_overlay is not None:
+      _gauges_overlay.draw(content_rect)

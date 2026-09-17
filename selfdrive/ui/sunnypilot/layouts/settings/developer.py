@@ -10,6 +10,7 @@ from pathlib import Path
 
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.cangauges import CanGaugesPanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.external_storage import ExternalStoragePanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.tailscale import TailscalePanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.webdashcam import WebDashcamPanel
@@ -68,8 +69,12 @@ class DeveloperLayoutSP(DeveloperLayout):
                                       tr("Browse and download dash cam clips from a phone or laptop on the same network."),
                                       callback=self._on_webdashcam_clicked)
 
+    self.gauges_btn = button_item(tr("Live Gauges (Beta)"), tr("OPEN"),
+                                  tr("Show live values from openpilot and decoded signals from the car's CAN bus."),
+                                  callback=self._on_gauges_clicked)
+
     self.items: list = [self.show_advanced_controls, self.enable_github_runner_toggle, self.enable_copyparty_toggle, self.prebuilt_toggle,
-                        self.error_log_btn, self.external_storage_btn, self.tailscale_btn, self.webdashcam_btn,]
+                        self.error_log_btn, self.external_storage_btn, self.tailscale_btn, self.webdashcam_btn, self.gauges_btn,]
 
   def _on_external_storage_clicked(self):
     gui_app.push_widget(ExternalStoragePanel())
@@ -79,6 +84,9 @@ class DeveloperLayoutSP(DeveloperLayout):
 
   def _on_webdashcam_clicked(self):
     gui_app.push_widget(WebDashcamPanel())
+
+  def _on_gauges_clicked(self):
+    gui_app.push_widget(CanGaugesPanel())
 
   @staticmethod
   def _on_prebuilt_toggled(state):
