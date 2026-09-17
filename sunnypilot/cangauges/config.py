@@ -37,7 +37,7 @@ _LOCK = threading.Lock()
 DEFAULT_GAUGES = [
   {"id": "speed", "label": "Speed", "source": "carState", "key": "vEgo",
    "unit": "mph", "scale": 2.23694, "min": 0, "max": 100, "style": "arc"},
-  {"id": "rpm", "label": "RPM", "source": "can", "key": "ENGINE_RPM.ENGINE_RPM",
+  {"id": "rpm", "label": "RPM", "source": "can", "key": "ENGINE_RPM.RPM",
    "unit": "rpm", "scale": 1.0, "min": 0, "max": 6000, "style": "arc"},
   {"id": "steer_angle", "label": "Steer Angle", "source": "carState", "key": "steeringAngleDeg",
    "unit": "deg", "scale": 1.0, "min": -180, "max": 180, "style": "bar"},
