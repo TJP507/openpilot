@@ -26,7 +26,7 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.cangauges import config as gauge_config
 
-TICK = 0.005
+TICK = 0.02  # 50 Hz; gauges only publish at update_hz (10 Hz), so no need to spin
 CONFIG_RELOAD = 1.0
 
 # gauge source -> cereal service name
@@ -206,9 +206,10 @@ def main() -> None:
       if now - last_cfg >= CONFIG_RELOAD:
         last_cfg = now
         cfg = gauge_config.load()
-      _decode_can_gauges(sm, cfg["gauges"], by_name, can_values, can_ok)
+      # only decode on the publish tick: decoding every tick was pure CPU burn
       if now - last_write >= 1.0 / cfg["update_hz"]:
         last_write = now
+        _decode_can_gauges(sm, cfg["gauges"], by_name, can_values, can_ok)
         _write_values(sm, cfg, can_values, can_ok)
       time.sleep(TICK)
     except Exception:

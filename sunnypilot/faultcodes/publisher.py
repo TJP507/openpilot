@@ -110,7 +110,7 @@ def main() -> None:
         }
         _write(snapshot)
 
-      time.sleep(0.005)
+      time.sleep(0.02)
     except Exception:
       cloudlog.exception("fault codes publisher tick failed")
       time.sleep(0.5)
