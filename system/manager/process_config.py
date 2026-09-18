@@ -75,6 +75,10 @@ def use_copyparty(started, params, CP: car.CarParams) -> bool:
 def use_webdashcam(started, params, CP: car.CarParams) -> bool:
   return (not PC) and webdashcam_config.get_enabled()
 
+def use_cangauges(started, params, CP: car.CarParams) -> bool:
+  # kill switch for testing/debugging the live gauges, no reboot or code change
+  return not os.path.exists("/data/community/cangauges_disabled")
+
 def sunnylink_ready_shim(started, params, CP: car.CarParams) -> bool:
   """Shim for sunnylink_ready to match the process manager signature."""
   return sunnylink_ready(params)
@@ -195,7 +199,7 @@ procs += [
   PythonProcess("tailscale", "sunnypilot.tailscale.manager", always_run, enabled=not PC, restart_if_crash=True),
 
   # live CAN gauges (samples built-in state and decodes configured DBC signals)
-  PythonProcess("cangauges", "sunnypilot.cangauges.publisher", always_run, enabled=not PC, restart_if_crash=True),
+  PythonProcess("cangauges", "sunnypilot.cangauges.publisher", use_cangauges, enabled=not PC, restart_if_crash=True),
 
   # fault code reader (read-only view of car/panda/system faults; no CAN TX)
   PythonProcess("faultcodes", "sunnypilot.faultcodes.publisher", always_run, enabled=not PC, restart_if_crash=True),
