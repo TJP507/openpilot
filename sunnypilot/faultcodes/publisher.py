@@ -29,6 +29,8 @@ PUBLISH_HZ = 2.0
 MAX_EVENTS = 40
 # openpilot event flags that describe a fault rather than a normal button press
 FAULT_EVENT_TYPES = ("permanent", "softDisable", "immediateDisable")
+# don't re-record the same event name more often than this (it can flicker)
+EVENT_COOLDOWN = 15.0
 
 
 def _event_types(event) -> list:
@@ -67,28 +69,27 @@ def main() -> None:
   sm = messaging.SubMaster(["carState", "onroadEvents", "pandaStates", "deviceState"])
 
   events: list = []
-  last_keys: set = set()
+  last_seen: dict = {}
   last_write = 0.0
 
   while True:
     try:
       sm.update(0)
+      now = time.monotonic()
 
-      # Record fault events on the rising edge, newest first.
+      # Record fault events, newest first, at most once per cooldown per name.
       if sm.updated["onroadEvents"]:
-        current: set = set()
         for event in sm["onroadEvents"]:
           types = _event_types(event)
           if not types:
             continue
-          key = (str(event.name), tuple(types))
-          current.add(key)
-          if key not in last_keys:
-            events.insert(0, {"time": time.monotonic(), "name": str(event.name), "types": types})
-            del events[MAX_EVENTS:]
-        last_keys = current
+          name = str(event.name)
+          if now - last_seen.get(name, -1e9) < EVENT_COOLDOWN:
+            continue
+          last_seen[name] = now
+          events.insert(0, {"time": now, "name": name, "types": types})
+          del events[MAX_EVENTS:]
 
-      now = time.monotonic()
       if now - last_write >= 1.0 / PUBLISH_HZ:
         last_write = now
 

@@ -533,7 +533,7 @@ async function loop(){
     $("#vehicle").innerHTML=active.map(x=>row("",x.label,x.detail,"")).join("");
     const panda=(s.panda||[]).filter(x=>x.active);
     let sys=panda.length?panda.map(x=>row("",x.label,"","")).join(""):row("good","No panda faults","","");
-    if(s.thermal&&s.thermal!=="green")sys+=row("warn","Device thermal: "+s.thermal,"","");
+    if(s.thermal&&s.thermal!=="ok")sys+=row("warn","Device thermal: "+s.thermal,"","");
     $("#system").innerHTML=sys;
     const ev=s.events||[];
     $("#events").innerHTML=ev.length?ev.map(e=>row("warn",e.name,(e.types||[]).join(", "),age(e.age||0))).join(""):row("good","No fault events","","");

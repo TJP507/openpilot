@@ -130,7 +130,7 @@ class FaultCodesPanel(NavWidget):
       y = self._row(x, width, y, tr("No panda faults"), "", GOOD_COLOR)
 
     thermal = str(self._snapshot.get("thermal", ""))
-    if thermal and thermal != "green":
+    if thermal and thermal != "ok":
       y = self._row(x, width, y, tr("Device thermal: {t}").format(t=thermal), "", WARN_COLOR)
 
     events = self._snapshot.get("events", [])
