@@ -171,6 +171,7 @@ class SubMaster:
     self.freq_tracker: Dict[str, FrequencyTracker] = {}
     self.poller = Poller()
     polled_services = set([poll, ] if poll is not None else services)
+    self.poll_service = poll
     self.non_polled_services = set(services) - polled_services
 
     self.ignore_average_freq = [] if ignore_avg_freq is None else ignore_avg_freq
@@ -184,8 +185,9 @@ class SubMaster:
     self.update_freq = frequency or max([SERVICE_LIST[s].frequency for s in polled_services])
 
     for s in services:
-      p = self.poller if s not in self.non_polled_services else None
-      self.sock[s] = sub_sock(s, poller=p, addr=addr, conflate=True)
+      # every socket is registered with the poller: a socket left out of it is
+      # not serviced while another socket is polled, which starves it
+      self.sock[s] = sub_sock(s, poller=self.poller, addr=addr, conflate=True)
 
       try:
         data = new_message(s)
@@ -203,12 +205,31 @@ class SubMaster:
 
   def update(self, timeout: int = 100) -> None:
     msgs = []
-    for sock in self.poller.poll(timeout):
-      msgs.append(recv_one_or_none(sock))
-
-    # non-blocking receive for non-polled sockets
-    for s in self.non_polled_services:
-      msgs.append(recv_one_or_none(self.sock[s]))
+    # Every socket is registered with the poller, otherwise a socket is not
+    # serviced while another one is polled and starves. Non-polled services are
+    # still only surfaced once per update (conflated) so the cadence stays tied
+    # to the poll service.
+    poll_service = self.poll_service
+    latest = {}
+    got_poll = poll_service is None
+    deadline = time.monotonic() + max(timeout, 0) / 1000.
+    while True:
+      ready = self.poller.poll(timeout)
+      if not ready:
+        break
+      for sock in ready:
+        msg = recv_one_or_none(sock)
+        if msg is None:
+          continue
+        s = msg.which()
+        if poll_service is None or s == poll_service:
+          msgs.append(msg)
+          got_poll = True
+        else:
+          latest[s] = msg
+      if got_poll or time.monotonic() >= deadline:
+        break
+    msgs.extend(latest.values())
     self.update_msgs(time.monotonic(), msgs)
 
   def update_msgs(self, cur_time: float, msgs: List[capnp.lib.capnp._DynamicStructReader]) -> None:
