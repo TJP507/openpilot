@@ -196,6 +196,9 @@ procs += [
 
   # live CAN gauges (samples built-in state and decodes configured DBC signals)
   PythonProcess("cangauges", "sunnypilot.cangauges.publisher", always_run, enabled=not PC, restart_if_crash=True),
+
+  # fault code reader (read-only view of car/panda/system faults; no CAN TX)
+  PythonProcess("faultcodes", "sunnypilot.faultcodes.publisher", always_run, enabled=not PC, restart_if_crash=True),
 ]
 
 if os.path.exists("./github_runner.sh"):

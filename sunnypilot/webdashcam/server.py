@@ -37,6 +37,7 @@ from cereal import car
 import cereal.messaging as messaging
 
 from openpilot.sunnypilot.cangauges import config as gauge_config
+from openpilot.sunnypilot.faultcodes import config as faultcode_config
 from openpilot.sunnypilot.webdashcam import config, library
 
 HOST = "0.0.0.0"
@@ -191,6 +192,7 @@ main{padding:12px;max-width:900px;margin:0 auto;padding-bottom:96px}
     </div>
     <span>
       <a class="btn" href="/gauges">Gauges</a>
+      <a class="btn" href="/faults">Faults</a>
       <a class="btn danger" href="/logout">Log out</a>
     </span>
   </div>
@@ -383,7 +385,7 @@ input.sm{width:84px}
 </head>
 <body>
 <header><div class="hdr"><h1>Live Gauges</h1>
-  <span><a class="btn" href="/">Dash Cam</a> <a class="btn danger" href="/logout">Log out</a></span>
+  <span><a class="btn" href="/">Dash Cam</a> <a class="btn" href="/faults">Faults</a> <a class="btn danger" href="/logout">Log out</a></span>
 </div></header>
 <main>
   <div id="grid" class="grid"></div>
@@ -468,6 +470,83 @@ async function loop(){
 """
 
 
+FAULTS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Fault Codes</title>
+<style>
+:root{--bg:#151515;--panel:#232323;--panel2:#2c2c2c;--text:#f2f2f2;--muted:#9aa0a6;--accent:#4a90d9;--fault:#eb645a;--good:#8cdc8c;--warn:#ffb478}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+header{position:sticky;top:0;background:rgba(21,21,21,.95);padding:14px 16px;border-bottom:1px solid #2c2c2c;z-index:5}
+.hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:900px;margin:0 auto}
+h1{font-size:20px;margin:0}
+h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:22px 0 10px}
+.btn{display:inline-block;padding:7px 12px;border-radius:9px;background:var(--panel2);
+color:var(--text);text-decoration:none;font-size:13px;border:1px solid #3a3a3a;cursor:pointer}
+.btn.danger{color:#ff9a8a;border-color:#5a2a2a}
+main{padding:14px;max-width:900px;margin:0 auto;padding-bottom:40px}
+.banner{border-radius:12px;padding:16px;font-size:18px;font-weight:600}
+.banner.ok{background:rgba(140,220,140,.12);color:var(--good);border:1px solid rgba(140,220,140,.35)}
+.banner.bad{background:rgba(235,100,90,.12);color:var(--fault);border:1px solid rgba(235,100,90,.35)}
+.f{display:flex;align-items:center;gap:12px;background:var(--panel);border-left:6px solid var(--fault);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+.f.good{border-left-color:var(--good)}
+.f.warn{border-left-color:var(--warn)}
+.f .grow{flex:1;min-width:0}
+.f .lbl{font-size:16px}
+.f .det{font-size:13px;color:var(--muted);margin-top:3px}
+.right{color:var(--muted);font-size:13px;white-space:nowrap}
+.muted{color:var(--muted);font-size:13px;margin-top:22px;line-height:1.5}
+</style>
+</head>
+<body>
+<header><div class="hdr"><h1>Fault Codes</h1>
+  <span><a class="btn" href="/">Dash Cam</a> <a class="btn" href="/gauges">Gauges</a> <a class="btn danger" href="/logout">Log out</a></span>
+</div></header>
+<main>
+  <div id="banner" class="banner ok">Loading&hellip;</div>
+  <div id="vehicle"></div>
+  <h3>System</h3>
+  <div id="system"></div>
+  <h3>Recent events</h3>
+  <div id="events"></div>
+  <p class="muted" id="note"></p>
+</main>
+<script>
+const $=(s)=>document.querySelector(s);
+async function api(p){const r=await fetch(p);if(r.status===401){location.href="/login";throw new Error("auth");}return r.json();}
+function age(s){s=Math.round(s);if(s<90)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}
+function esc(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML;}
+function row(cls,lbl,det,right){
+  const d=det?`<div class="det">${esc(det)}</div>`:"";
+  const r=right?`<span class="right">${esc(right)}</span>`:"";
+  return `<div class="f ${cls}"><div class="grow"><div class="lbl">${esc(lbl)}</div>${d}</div>${r}</div>`;
+}
+async function loop(){
+  try{
+    const s=await api("/api/faults");
+    const active=(s.vehicle||[]).filter(x=>x.active);
+    $("#banner").className="banner "+(active.length?"bad":"ok");
+    $("#banner").textContent=active.length?active.length+" active fault"+(active.length>1?"s":""):"No active faults";
+    $("#vehicle").innerHTML=active.map(x=>row("",x.label,x.detail,"")).join("");
+    const panda=(s.panda||[]).filter(x=>x.active);
+    let sys=panda.length?panda.map(x=>row("",x.label,"","")).join(""):row("good","No panda faults","","");
+    if(s.thermal&&s.thermal!=="green")sys+=row("warn","Device thermal: "+s.thermal,"","");
+    $("#system").innerHTML=sys;
+    const ev=s.events||[];
+    $("#events").innerHTML=ev.length?ev.map(e=>row("warn",e.name,(e.types||[]).join(", "),age(e.age||0))).join(""):row("good","No fault events","","");
+    $("#note").textContent=s.note||"";
+  }catch(e){}
+  setTimeout(loop,1000);
+}
+loop();
+</script>
+</body></html>
+"""
+
+
 async def handle_gauges_page(_request: web.Request) -> web.Response:
   return web.Response(text=GAUGES_HTML, content_type="text/html")
 
@@ -489,6 +568,14 @@ async def handle_api_gauges_config(request: web.Request) -> web.Response:
     return web.json_response({"error": "invalid config"}, status=400)
   gauge_config.save(data)
   return web.json_response({"ok": True, "config": gauge_config.load()})
+
+
+async def handle_faults_page(_request: web.Request) -> web.Response:
+  return web.Response(text=FAULTS_HTML, content_type="text/html")
+
+
+async def handle_api_faults(_request: web.Request) -> web.Response:
+  return web.json_response(faultcode_config.read_snapshot())
 
 
 def _session_token() -> str | None:
@@ -830,6 +917,8 @@ def main() -> None:
     web.get("/api/gauges", handle_api_gauges),
     web.get("/api/gauges/catalog", handle_api_gauges_catalog),
     web.post("/api/gauges/config", handle_api_gauges_config),
+    web.get("/faults", handle_faults_page),
+    web.get("/api/faults", handle_api_faults),
   ])
 
   cert, key = _ensure_cert()

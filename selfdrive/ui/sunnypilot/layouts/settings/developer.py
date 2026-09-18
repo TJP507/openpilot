@@ -12,6 +12,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.cangauges import CanGaugesPanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.external_storage import ExternalStoragePanel
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.faultcodes import FaultCodesPanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.tailscale import TailscalePanel
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.webdashcam import WebDashcamPanel
 from openpilot.system.hardware import PC
@@ -73,8 +74,13 @@ class DeveloperLayoutSP(DeveloperLayout):
                                   tr("Show live values from openpilot and decoded signals from the car's CAN bus."),
                                   callback=self._on_gauges_clicked)
 
+    self.faults_btn = button_item(tr("Fault Codes (Beta)"), tr("VIEW"),
+                                  tr("Read-only view of active vehicle, panda and system faults, plus recent fault events."),
+                                  callback=self._on_faults_clicked)
+
     self.items: list = [self.show_advanced_controls, self.enable_github_runner_toggle, self.enable_copyparty_toggle, self.prebuilt_toggle,
-                        self.error_log_btn, self.external_storage_btn, self.tailscale_btn, self.webdashcam_btn, self.gauges_btn,]
+                        self.error_log_btn, self.external_storage_btn, self.tailscale_btn, self.webdashcam_btn, self.gauges_btn,
+                        self.faults_btn,]
 
   def _on_external_storage_clicked(self):
     gui_app.push_widget(ExternalStoragePanel())
@@ -87,6 +93,9 @@ class DeveloperLayoutSP(DeveloperLayout):
 
   def _on_gauges_clicked(self):
     gui_app.push_widget(CanGaugesPanel())
+
+  def _on_faults_clicked(self):
+    gui_app.push_widget(FaultCodesPanel())
 
   @staticmethod
   def _on_prebuilt_toggled(state):
