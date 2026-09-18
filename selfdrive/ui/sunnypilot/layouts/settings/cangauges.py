@@ -111,7 +111,7 @@ class CanGaugesPanel(NavWidget):
 
     grid = rl.Rectangle(rect.x, rect.y + 120, rect.width, rect.height - 120)
     rows = max(1, math.ceil(len(gauges) / COLS))
-    rows = min(rows, 4)
+    rows = min(rows, 5)
     pad = 22
     tile_w = (grid.width - pad * (COLS + 1)) / COLS
     tile_h = (grid.height - pad * (rows + 1)) / rows

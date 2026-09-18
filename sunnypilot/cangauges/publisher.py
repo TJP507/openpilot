@@ -37,6 +37,11 @@ SERVICE = {
   "gps": "gpsLocationExternal",
 }
 
+# The generated DBC only defines the signals openpilot itself needs. A few
+# signals the car broadcasts anyway (engine coolant, transmission temp) only
+# exist in Toyota's reference DBC, so pull those in too when applicable.
+SUPPLEMENTAL_DBCS = ("toyota_2017_ref_pt",)
+
 
 def _platform_dbc_names() -> list:
   """DBC names for the car this device is configured for."""
@@ -49,7 +54,10 @@ def _platform_dbc_names() -> list:
     platform = PLATFORMS.get(car_params.carFingerprint)
     if platform is None:
       return []
-    return [name for name in dict(platform.config.dbc_dict).values() if name]
+    names = [name for name in dict(platform.config.dbc_dict).values() if name]
+    if any("toyota" in name for name in names):
+      names += [name for name in SUPPLEMENTAL_DBCS if name not in names]
+    return names
   except Exception:
     cloudlog.exception("can gauges: failed to resolve platform DBCs")
     return []
