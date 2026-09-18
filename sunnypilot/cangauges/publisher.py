@@ -119,8 +119,12 @@ def _decode_can_gauges(sm, gauges: list, by_name: dict, can_values: dict, can_ok
       can_ok[gauge["id"]] = False
       continue
     payload = next((bytes(fr.dat) for fr in frames if fr.address == addr), None)
-    if payload is None or len(payload) < msg.size:
+    if payload is None:
       continue  # no frame this tick, keep the previous value
+    # The DBC message length can exceed the actual frame DLC (e.g. a 4 byte
+    # frame for an 8 byte message), so only require the bytes this signal uses.
+    if len(payload) < max(sig.msb, sig.lsb) // 8 + 1:
+      continue
     from opendbc.can.parser import get_raw_value
     raw = get_raw_value(payload, sig)
     if sig.is_signed:
