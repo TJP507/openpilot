@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from enum import IntEnum
 from functools import partial
@@ -39,6 +40,9 @@ except Exception:
 NM_DEVICE_STATE_NEED_AUTH = 60
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 64
+# Dropped by the Cellular settings page to ask the modem process to zero the
+# persisted cellular data usage counters.
+CELLULAR_USAGE_RESET_FILE = "/data/community/cellular_usage_reset"
 ITEM_HEIGHT = 160
 ICON_SIZE = 50
 
@@ -206,6 +210,11 @@ class CellularSettings(Widget):
     # APN setting
     self._apn_btn = button_item(lambda: tr("APN Setting"), lambda: tr("EDIT"), callback=self._edit_apn)
 
+    # Reset the persisted cellular data usage counters
+    self._reset_usage_btn = button_item(lambda: tr("Reset Data Usage"), lambda: tr("RESET"),
+                                        lambda: tr("Reset the cellular data usage counters to zero."),
+                                        callback=self._reset_data_usage)
+
     # Status items
     items: list[Widget] = [
       text_item(lambda: tr("Status"), lambda: self._fmt_state()),
@@ -221,8 +230,9 @@ class CellularSettings(Widget):
       self._cellular_metered_btn,
       text_item(lambda: tr("IMEI"), lambda: self._modem_state.get("imei", "N/A")),
       text_item(lambda: tr("ICCID"), lambda: self._modem_state.get("iccid", "N/A")),
-      text_item(lambda: tr("Data Sent"), lambda: self._fmt_bytes(self._modem_state.get("tx_bytes"))),
-      text_item(lambda: tr("Data Received"), lambda: self._fmt_bytes(self._modem_state.get("rx_bytes"))),
+      text_item(lambda: tr("Data Sent"), lambda: self._fmt_bytes(self._modem_state.get("total_tx_bytes", self._modem_state.get("tx_bytes")))),
+      text_item(lambda: tr("Data Received"), lambda: self._fmt_bytes(self._modem_state.get("total_rx_bytes", self._modem_state.get("rx_bytes")))),
+      self._reset_usage_btn,
     ]
 
     self._scroller = Scroller(items, line_separator=True, spacing=0)
@@ -275,6 +285,14 @@ class CellularSettings(Widget):
     self._keyboard.set_text(current_apn)
     self._keyboard.set_callback(update_apn)
     gui_app.push_widget(self._keyboard)
+
+  def _reset_data_usage(self):
+    try:
+      os.makedirs(os.path.dirname(CELLULAR_USAGE_RESET_FILE), exist_ok=True)
+      with open(CELLULAR_USAGE_RESET_FILE, "w"):
+        pass
+    except OSError:
+      pass
 
   def show_event(self):
     super().show_event()

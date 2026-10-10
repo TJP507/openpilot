@@ -27,6 +27,10 @@ AT_LOCK = "/dev/shm/modem.lock"  # shared with LPA
 # SIM/APN/roaming). Params can't be used for this: adding new param keys needs a
 # rebuild, and this trigger has no persisted value anyway.
 REINIT_FILE = "/data/community/modem_reinit"
+# Cumulative cellular data usage, persisted across reboots and ppp0 sessions.
+# The Cellular settings UI drops USAGE_RESET_FILE to zero the counters.
+USAGE_FILE = "/data/community/cellular_usage.json"
+USAGE_RESET_FILE = "/data/community/cellular_usage_reset"
 AT_INIT = [
   "ATE0",       # disable command echo
   "ATV1",       # verbose result codes (CONNECT/BUSY/NO CARRIER, not numeric)
@@ -64,7 +68,33 @@ INITIAL_STATE = {
   "network_type": "unknown", "operator": "", "band": "", "channel": 0,
   "registration": "unknown", "temperatures": [], "extra": "",
   "tx_bytes": 0, "rx_bytes": 0,
+  "total_tx_bytes": 0, "total_rx_bytes": 0,
 }
+
+
+def _load_cellular_usage() -> dict:
+  try:
+    with open(USAGE_FILE) as f:
+      d = json.load(f)
+  except (OSError, ValueError):
+    d = {}
+  return {
+    "tx": int(d.get("tx", 0)),
+    "rx": int(d.get("rx", 0)),
+    "raw_tx": int(d.get("raw_tx", 0)),
+    "raw_rx": int(d.get("raw_rx", 0)),
+  }
+
+
+def _save_cellular_usage(u: dict) -> None:
+  try:
+    os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
+    tmp = USAGE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+      json.dump(u, f)
+    os.replace(tmp, USAGE_FILE)
+  except OSError:
+    pass
 
 
 class State(Enum):
@@ -520,7 +550,25 @@ class Modem:
         rx = int(f.read().strip())
     except Exception:
       return {}
-    return {"tx_bytes": tx, "rx_bytes": rx}
+
+    usage = _load_cellular_usage()
+    if os.path.exists(USAGE_RESET_FILE):
+      try:
+        os.remove(USAGE_RESET_FILE)
+      except OSError:
+        pass
+      usage["tx"] = usage["rx"] = 0
+      usage["raw_tx"], usage["raw_rx"] = tx, rx
+    else:
+      # ppp0 counters reset to 0 on every new session, so a decrease means the
+      # interface was recreated: count the new value from zero.
+      usage["tx"] += tx - usage["raw_tx"] if tx >= usage["raw_tx"] else tx
+      usage["rx"] += rx - usage["raw_rx"] if rx >= usage["raw_rx"] else rx
+      usage["raw_tx"], usage["raw_rx"] = tx, rx
+    _save_cellular_usage(usage)
+
+    return {"tx_bytes": tx, "rx_bytes": rx,
+            "total_tx_bytes": usage["tx"], "total_rx_bytes": usage["rx"]}
 
   def _poll(self):
     s: dict = {}
