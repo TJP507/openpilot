@@ -191,6 +191,9 @@ procs += [
   # web dash cam (password protected downloads; runs whenever enabled and refuses
   # requests unless the car is parked, so it survives onroad/offroad transitions)
   PythonProcess("webdashcam", "sunnypilot.webdashcam.server", use_webdashcam, enabled=not PC, restart_if_crash=True),
+
+  # TylerPilot Cloud link agent (lightweight; idles when the device is not linked)
+  PythonProcess("tylerpilotd", "sunnypilot.tylerpilot.agent", always_run, restart_if_crash=True),
 ]
 
 if os.path.exists("./github_runner.sh"):

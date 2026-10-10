@@ -11,6 +11,7 @@ from pathlib import Path
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.webdashcam import WebDashcamPanel
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.tylerpilot import TylerPilotPanel
 from openpilot.system.hardware import PC
 from openpilot.system.hardware.hw import Paths
 from openpilot.system.ui.lib.application import gui_app
@@ -57,11 +58,18 @@ class DeveloperLayoutSP(DeveloperLayout):
                                       tr("Browse and download dash cam clips from a phone or laptop on the same WI-FI network."),
                                       callback=self._on_webdashcam_clicked)
 
+    self.tylerpilot_btn = button_item(tr("TylerPilot Cloud"), tr("OPEN"),
+                                      tr("Link this device to your TylerPilot server for stats and remote SSH."),
+                                      callback=self._on_tylerpilot_clicked)
+
     self.items: list = [self.show_advanced_controls, self.enable_github_runner_toggle, self.enable_copyparty_toggle, self.prebuilt_toggle,
-                        self.error_log_btn, self.webdashcam_btn,]
+                        self.error_log_btn, self.webdashcam_btn, self.tylerpilot_btn,]
 
   def _on_webdashcam_clicked(self):
     gui_app.push_widget(WebDashcamPanel())
+
+  def _on_tylerpilot_clicked(self):
+    gui_app.push_widget(TylerPilotPanel())
 
   @staticmethod
   def _on_prebuilt_toggled(state):
