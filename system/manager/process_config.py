@@ -73,7 +73,8 @@ def use_copyparty(started, params, CP: car.CarParams) -> bool:
   return bool(params.get_bool("EnableCopyparty"))
 
 def use_webdashcam(started, params, CP: car.CarParams) -> bool:
-  return (not PC) and webdashcam_config.get_enabled()
+  # Only run while off-road: the web dash cam must never be available while driving.
+  return (not PC) and (not started) and webdashcam_config.get_enabled()
 
 def sunnylink_ready_shim(started, params, CP: car.CarParams) -> bool:
   """Shim for sunnylink_ready to match the process manager signature."""

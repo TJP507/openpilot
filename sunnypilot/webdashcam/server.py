@@ -33,7 +33,6 @@ import zlib
 import psutil
 from aiohttp import web
 
-from cereal import car
 import cereal.messaging as messaging
 
 from openpilot.sunnypilot.webdashcam import config, library
@@ -92,19 +91,17 @@ def _request_allowed(request: web.Request) -> bool:
 _SM = None
 
 
-def _is_parked() -> bool:
-  """True when the car is offroad, or onroad with the gear selector in Park.
+def _is_offroad() -> bool:
+  """True only when the car is off-road.
 
-  The server now runs whenever it is enabled rather than only offroad, so it
-  must refuse to serve while the car is not parked.
+  The web dash cam is never served while the car is on-road (driving or in
+  gear), even if it is enabled.
   """
   global _SM
   if _SM is None:
     _SM = messaging.SubMaster(["carState", "deviceState"])
   _SM.update(0)
-  if not _SM["deviceState"].started:
-    return True
-  return bool(_SM["carState"].valid) and _SM["carState"].gearShifter == car.CarState.GearShifter.park
+  return not _SM["deviceState"].started
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -313,8 +310,8 @@ def _login_html(error: str = "") -> str:
 async def auth_middleware(request: web.Request, handler):
   if not _request_allowed(request):
     return web.Response(status=403, text="Not available on this network.")
-  if not _is_parked():
-    return web.Response(status=403, text="Dash cam web server is only available while parked (gear P).")
+  if not _is_offroad():
+    return web.Response(status=403, text="Dash cam web server is only available while off-road (not while driving).")
   if request.path == "/favicon.ico":
     return web.Response(status=204)
   if request.path in ("/login", "/logout"):

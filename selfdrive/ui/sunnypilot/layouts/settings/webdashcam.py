@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pyray as rl
 
-from openpilot.selfdrive.ui.ui_state import device
+from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.sunnypilot.webdashcam import config as webdashcam
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -94,14 +94,19 @@ class WebDashcamPanel(NavWidget):
   def _update_state(self) -> None:
     super()._update_state()
     self._toggle.action_item.set_state(webdashcam.get_enabled())
+    # Never allow enabling while on-road; the server also refuses to run on-road.
+    self._toggle.action_item.set_enabled(ui_state.is_offroad())
 
   @staticmethod
   def _description() -> str:
     return tr("Browse and download dash cam clips from a phone or laptop on the same network " +
-              "(Wi-Fi or LAN).\nThe server only serves while parked (gear P) and requires the password shown below.")
+              "(Wi-Fi or LAN).\nOnly available while off-road, and requires the password shown below.")
 
   @staticmethod
   def _on_toggle(state: bool) -> None:
+    # Guard: do not allow enabling while on-road.
+    if state and not ui_state.is_offroad():
+      return
     webdashcam.set_enabled(state)
 
   @staticmethod
