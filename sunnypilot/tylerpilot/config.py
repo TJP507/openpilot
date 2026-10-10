@@ -27,20 +27,26 @@ KNOWN_HOSTS_PATH = os.path.join(STATE_DIR, "tylerpilot_known_hosts")
 # The comma's SSH login user (where the server's login key is installed).
 DEVICE_SSH_USER = "comma"
 
-# Hardcoded PoC server address.
-DEFAULT_HOST = "10.5.8.53"
-DEFAULT_PORT = 10443
+# Server address. TCP-passthrough endpoint (the reverse proxy forwards raw TLS
+# to the backend, so the device sees our pinned self-signed cert).
+DEFAULT_HOST = "pilot-connect.tylerjp.com"
+DEFAULT_PORT = 8021
+# Port the device uses for the reverse SSH tunnel (the server's sshd). The
+# proxy must passthrough this port to the backend's :22.
+DEFAULT_SSH_PORT = 8022
 
 _LOCK = threading.Lock()
 
 _DEFAULTS: dict = {
   "host": DEFAULT_HOST,
   "port": DEFAULT_PORT,
+  "ssh_port": DEFAULT_SSH_PORT,
   "device_id": "",
   "token": "",
   "fingerprint": "",
   "name": "",
   "server_name": "",
+  "server_ssh_key": "",
   "linked": False,
   "last_error": "",
 }
@@ -85,13 +91,16 @@ def is_linked() -> bool:
   return bool(s["linked"] and s["token"] and s["device_id"])
 
 
-def set_link(device_id: str, token: str, fingerprint: str, server_name: str, name: str) -> dict:
+def set_link(device_id: str, token: str, fingerprint: str, server_name: str, name: str,
+             server_ssh_key: str = "") -> dict:
   return set_values(device_id=device_id, token=token, fingerprint=fingerprint,
-                    server_name=server_name, name=name, linked=True, last_error="")
+                    server_name=server_name, name=name, server_ssh_key=server_ssh_key,
+                    linked=True, last_error="")
 
 
 def clear_link() -> dict:
-  return set_values(device_id="", token="", fingerprint="", server_name="", linked=False, last_error="")
+  return set_values(device_id="", token="", fingerprint="", server_name="", server_ssh_key="",
+                    linked=False, last_error="")
 
 
 def set_error(msg: str) -> None:
