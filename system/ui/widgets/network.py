@@ -100,7 +100,9 @@ class NetworkUI(Widget):
     self._set_panel(PanelType.SELECT)
 
   def _go_back(self):
-    self._set_panel(PanelType.SELECT)
+    # The header button is labelled with the other connection panel and switches
+    # straight to it (Wi-Fi <-> Cellular).
+    self._set_panel(PanelType.CELLULAR if self._current_panel == PanelType.WIFI else PanelType.WIFI)
 
   def _set_panel(self, panel: PanelType):
     self._current_panel = panel
@@ -122,16 +124,20 @@ class NetworkUI(Widget):
       self._cellular_btn.set_rect(rl.Rectangle(x, y + btn_h + gap, btn_w, btn_h))
       self._cellular_btn.render()
     elif self._current_panel == PanelType.WIFI:
-      content_rect = rl.Rectangle(self._rect.x, self._rect.y + self._back_btn.rect.height + 40,
-                                  self._rect.width, self._rect.height - self._back_btn.rect.height - 40)
+      self._back_btn.text = tr("Cellular")
       self._back_btn.set_position(self._rect.x, self._rect.y + 20)
       self._back_btn.render()
+      # The Wi-Fi panel draws its own top row (Settings/Networks); hand it a rect
+      # starting on the header line so that button aligns with Back/Scan.
+      content_rect = rl.Rectangle(self._rect.x, self._rect.y + 20,
+                                  self._rect.width, self._rect.height - 20)
       self._wifi_panel.render(content_rect)
     else:
-      content_rect = rl.Rectangle(self._rect.x, self._rect.y + self._back_btn.rect.height + 40,
-                                  self._rect.width, self._rect.height - self._back_btn.rect.height - 40)
+      self._back_btn.text = tr("Wi-Fi")
       self._back_btn.set_position(self._rect.x, self._rect.y + 20)
       self._back_btn.render()
+      content_rect = rl.Rectangle(self._rect.x, self._rect.y + self._back_btn.rect.height + 40,
+                                  self._rect.width, self._rect.height - self._back_btn.rect.height - 40)
       self._cellular_panel.render(content_rect)
 
 
