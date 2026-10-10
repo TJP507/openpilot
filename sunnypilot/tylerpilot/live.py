@@ -33,6 +33,40 @@ STREAMS = {
   "driver": VisionStreamType.VISION_STREAM_DRIVER,
 }
 
+PARAMS_DIR = "/data/params/d"
+
+
+def _params_owner():
+  """uid/gid that should own the params dir (comma), so root-run cleanups match."""
+  for path in (PARAMS_DIR, "/data/params"):
+    try:
+      st = os.stat(path)
+      if st.st_uid != 0:
+        return st.st_uid, st.st_gid
+    except OSError:
+      pass
+  return None
+
+
+def _restore_params_owner(owner):
+  """We run as root (camerad needs it); never leave root-owned params behind,
+  the manager runs as comma and hard-fails if it can't read /data/params/d."""
+  if owner is None or os.geteuid() != 0:
+    return
+  uid, gid = owner
+  try:
+    names = os.listdir(PARAMS_DIR)
+  except OSError:
+    return
+  for name in names:
+    p = os.path.join(PARAMS_DIR, name)
+    try:
+      st = os.lstat(p)
+      if st.st_uid == 0 or st.st_gid == 0:
+        os.chown(p, uid, gid)
+    except OSError:
+      pass
+
 
 def yuv_to_rgb(y, u, v):
   ul = np.repeat(np.repeat(u, 2).reshape(u.shape[0], y.shape[1]), 2, axis=0).reshape(y.shape)
@@ -76,6 +110,8 @@ def main() -> int:
   ap.add_argument("--subsample", type=int, default=2)
   args = ap.parse_args()
 
+  owner = _params_owner()
+
   # Off-road camerad isn't running; start it exactly like
   # system/camerad/snapshot.py does. camerad is noisy on stdout/stderr, which is
   # our MJPEG stream, so we point fd 1/2 at /dev/null only while it starts.
@@ -115,6 +151,7 @@ def main() -> int:
         manager_proc.stop()
       except Exception:
         pass
+    _restore_params_owner(owner)
     return 1
 
   interval = 1.0 / max(args.fps, 0.5)
@@ -156,6 +193,7 @@ def main() -> int:
         manager_proc.stop()
       except Exception:
         pass
+    _restore_params_owner(owner)
   return 0
 
 
