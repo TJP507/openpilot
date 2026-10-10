@@ -224,6 +224,7 @@ class Device(DeviceSP):
     self._interaction_time: float = -1
     self._override_interactive_timeout: int | None = None
     self._interactive_timeout_callbacks: list[Callable] = []
+    self._keep_awake_callbacks: list[Callable[[], bool]] = []
     self._prev_timed_out = False
     self._awake: bool = True
 
@@ -259,6 +260,11 @@ class Device(DeviceSP):
 
   def add_interactive_timeout_callback(self, callback: Callable):
     self._interactive_timeout_callbacks.append(callback)
+
+  def add_keep_awake_callback(self, callback: Callable[[], bool]) -> None:
+    # While any registered callback returns True the interactive timeout is held
+    # off, so the screen stays on for as long as an operation is in progress.
+    self._keep_awake_callbacks.append(callback)
 
   def update(self):
     self._start_brightness_thread()  # start thread after manager forks ui
@@ -327,6 +333,9 @@ class Device(DeviceSP):
       if gui_app.sunnypilot_ui():
         DeviceSP.wake_from_dimmed_onroad_brightness(ui_state, gui_app.mouse_events)
 
+      self._reset_interactive_timeout()
+
+    if any(callback() for callback in self._keep_awake_callbacks):
       self._reset_interactive_timeout()
 
     interaction_timeout = time.monotonic() > self._interaction_time
