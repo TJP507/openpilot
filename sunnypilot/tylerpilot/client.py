@@ -71,25 +71,56 @@ def ensure_tunnel_key() -> str:
     return f.read().strip()
 
 
+def _authorized_keys_paths() -> list[str]:
+  # On a comma 3X, sshd reads `authorizedkeysfile /data/params/d/GithubSshKeys
+  # /tmp/authorized_keys`. We deliberately use /tmp/authorized_keys: the comma UI
+  # only manages the GithubSshKeys param, so our key survives the user adding or
+  # removing their own GitHub keys. The agent re-installs it on boot, so it also
+  # survives reboots.
+  paths = ["/tmp/authorized_keys"]
+  for home in {f"/home/{config.DEVICE_SSH_USER}", os.path.expanduser("~")}:
+    paths.append(os.path.join(home, ".ssh", "authorized_keys"))
+  return paths
+
+
 def install_server_key(pubkey: str) -> None:
-  """Authorize the server's login key so it can SSH into this device."""
+  """Authorize the server's login key on this device (idempotent)."""
   pub = (pubkey or "").strip()
   if not pub.startswith("ssh-"):
     return
-  for home in {f"/home/{config.DEVICE_SSH_USER}", os.path.expanduser("~")}:
+  b64 = pub.split()[1]
+  for path in _authorized_keys_paths():
     try:
-      d = os.path.join(home, ".ssh")
-      os.makedirs(d, exist_ok=True)
-      os.chmod(d, 0o700)
-      ak = os.path.join(d, "authorized_keys")
+      os.makedirs(os.path.dirname(path), exist_ok=True)
       existing = ""
-      if os.path.exists(ak):
-        with open(ak) as f:
+      if os.path.exists(path):
+        with open(path) as f:
           existing = f.read()
-      if pub not in existing:
-        with open(ak, "a") as f:
+      if b64 not in existing:
+        with open(path, "a") as f:
+          if existing and not existing.endswith("\n"):
+            f.write("\n")
           f.write(pub + "\n")
-      os.chmod(ak, 0o600)
+      os.chmod(path, 0o600)
+    except OSError:
+      pass
+
+
+def remove_server_key(pubkey: str) -> None:
+  """Remove the server's login key (used on unlink)."""
+  pub = (pubkey or "").strip()
+  if not pub.startswith("ssh-"):
+    return
+  b64 = pub.split()[1]
+  for path in _authorized_keys_paths():
+    try:
+      if not os.path.exists(path):
+        continue
+      with open(path) as f:
+        kept = [ln for ln in f.read().splitlines() if b64 not in ln]
+      with open(path, "w") as f:
+        f.write("\n".join(kept) + ("\n" if kept else ""))
+      os.chmod(path, 0o600)
     except OSError:
       pass
 
@@ -101,6 +132,7 @@ def register(host: str, port: int, code: str, name: str, uid: str, version: str,
   payload = {
     "code": code, "name": name, "uid": uid, "version": version,
     "dongle_id": dongle_id, "tunnel_pubkey": tunnel_pubkey,
+    "ssh_user": config.DEVICE_SSH_USER,
   }
   status, data, fp = _request(
     host, port, "POST", "/api/v1/device/register",

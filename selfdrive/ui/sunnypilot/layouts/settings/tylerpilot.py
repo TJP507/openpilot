@@ -154,9 +154,10 @@ class TylerPilotPanel(NavWidget):
       pubkey = client.ensure_tunnel_key()
       result = client.register(host, port, code, _device_name(), _device_uid(),
                                get_version(), _dongle_id(), pubkey)
-      client.install_server_key(result.get("ssh_pubkey", ""))
+      srv_key = result.get("ssh_pubkey", "")
+      client.install_server_key(srv_key)
       tp.set_link(result["device_id"], result["token"], result["fingerprint"],
-                  result.get("server_name", ""), _device_name())
+                  result.get("server_name", ""), _device_name(), srv_key)
     except Exception as e:
       tp.set_error(str(e))
 
@@ -164,6 +165,8 @@ class TylerPilotPanel(NavWidget):
   def _on_unlink() -> None:
     def _do(result: int):
       if result == DialogResult.CONFIRM:
+        from openpilot.sunnypilot.tylerpilot import client
+        client.remove_server_key(tp.get("server_ssh_key"))
         tp.clear_link()
 
     gui_app.push_widget(ConfirmDialog(
