@@ -16,7 +16,7 @@ import psutil
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.version import get_version
 
-from openpilot.sunnypilot.tylerpilot import config, client, log
+from openpilot.sunnypilot.tylerpilot import config, client, log, actions
 
 # Heartbeat cadence (seconds) by link type.
 _INTERVAL = {"wifi": 15, "lan": 15, "lte": 15, "none": 15}
@@ -105,8 +105,14 @@ def _reap_tunnels() -> None:
 
 
 def _handle_command(cmd: dict) -> None:
-  if cmd.get("type") != "ssh_request":
-    return
+  ctype = cmd.get("type")
+  if ctype == "ssh_request":
+    _handle_ssh(cmd)
+  elif ctype == "job":
+    _run_job(cmd)
+
+
+def _handle_ssh(cmd: dict) -> None:
   _reap_tunnels()
   remote_port = int(cmd.get("port"))
 
@@ -128,6 +134,28 @@ def _handle_command(cmd: dict) -> None:
     log.info(f"opened reverse tunnel on server port {remote_port}")
   except Exception as e:
     config.set_error(f"tunnel failed: {e}")
+
+
+def _run_job(cmd: dict) -> None:
+  job_id = str(cmd.get("id") or "")
+  kind = str(cmd.get("kind") or "")
+  payload = cmd.get("payload") or {}
+  log.info(f"job {kind} ({job_id})")
+
+  ok, result, extra = actions.run(kind, payload)
+
+  host, port = config.get("host"), int(config.get("port"))
+  token, pin = config.get("token"), config.get("fingerprint")
+  try:
+    if extra and extra.get("kind") == "_location":
+      client.post_location(host, port, token, pin, extra.get("points") or [])
+      extra = None
+    elif extra and extra.get("kind") == "_trips":
+      client.post_trips(host, port, token, pin, extra.get("trips") or [])
+      extra = None
+    client.job_result(host, port, token, pin, job_id, ok, result, extra)
+  except Exception as e:
+    log.warning(f"job result report failed: {e}")
 
 
 def _ensure_server_key() -> None:

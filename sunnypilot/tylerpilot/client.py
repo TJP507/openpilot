@@ -166,6 +166,42 @@ def poll(host: str, port: int, token: str, pin: str, timeout: float = 40.0) -> d
   return json.loads(data)
 
 
+def job_result(host: str, port: int, token: str, pin: str, job_id: str,
+               ok: bool, result: str = "", artifact: dict | None = None) -> None:
+  payload: dict = {"id": job_id, "status": "done" if ok else "failed", "result": result}
+  if artifact:
+    payload["artifact"] = artifact  # {kind, label, data(base64)}
+  status, data, _ = _request(
+    host, port, "POST", "/api/v1/device/job_result",
+    {"content-type": "application/json", "authorization": f"Bearer {token}"},
+    json.dumps(payload), pin=pin, timeout=120.0,
+  )
+  if status != 200:
+    raise LinkError(_err(data))
+
+
+def post_location(host: str, port: int, token: str, pin: str, points: list) -> None:
+  _request(host, port, "POST", "/api/v1/device/location",
+           {"content-type": "application/json", "authorization": f"Bearer {token}"},
+           json.dumps({"points": points}), pin=pin, timeout=30.0)
+
+
+def post_trips(host: str, port: int, token: str, pin: str, trips: list) -> None:
+  _request(host, port, "POST", "/api/v1/device/trips",
+           {"content-type": "application/json", "authorization": f"Bearer {token}"},
+           json.dumps({"trips": trips}), pin=pin, timeout=60.0)
+
+
+def download_artifact(host: str, port: int, token: str, pin: str, artifact_id: str) -> bytes:
+  status, data, _ = _request(
+    host, port, "GET", f"/api/v1/device/artifact?id={artifact_id}",
+    {"authorization": f"Bearer {token}"}, None, pin=pin, timeout=120.0,
+  )
+  if status != 200:
+    raise LinkError(_err(data))
+  return data
+
+
 def open_tunnel(host: str, remote_port: int, ssh_port: int = 22, local_ssh_port: int = 22):
   """Open a reverse tunnel 127.0.0.1:<remote_port> on the server -> this device's SSH."""
   args = [
