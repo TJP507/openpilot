@@ -10,8 +10,8 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
   server cert fingerprint is captured on first registration (trust-on-first-use,
   authorized by the pairing code) and verified on every later connection.
 - `agent.py` — background process `tylerpilotd`: heartbeat + 25s long-poll for
-  commands. Idles when not linked. Interval scales by link type
-  (Wi-Fi/LAN 30s, LTE 60s) to keep cellular data minimal.
+  commands. Idles when not linked. Heartbeat is 15s on every link type.
+- `log.py` — TylerPilot-only log, capped at **50 MB** (see Logs below).
 - `../selfdrive/ui/.../settings/tylerpilot.py` — the Settings panel
   (**Settings → Developer → TylerPilot Cloud**).
 
@@ -27,9 +27,21 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
 Hardcoded for the PoC in `config.py`:
 
 ```python
-DEFAULT_HOST = "10.5.8.53"
-DEFAULT_PORT = 10443
+DEFAULT_HOST = "pilot-connect.tylerjp.com"
+DEFAULT_PORT = 8021  # API (TLS passthrough to the backend)
+DEFAULT_SSH_PORT = 8022  # reverse-SSH tunnel
 ```
+
+## Logs
+
+TylerPilot keeps its own log, deliberately **separate from openpilot's swaglog**
+so it never touches sunnypilot's logs:
+
+- Path: `/data/community/tylerpilot.log`
+- Cap: **50 MB** — on overflow the file is trimmed down to its most recent half,
+  so total size stays under the cap without a hard stop.
+- Written by `log.py` (`info` / `warning` / `error`); the agent no longer sends
+  its messages to `cloudlog`.
 
 ## Remote SSH
 

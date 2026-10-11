@@ -13,11 +13,10 @@ import time
 
 import psutil
 
-from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.version import get_version
 
-from openpilot.sunnypilot.tylerpilot import config, client
+from openpilot.sunnypilot.tylerpilot import config, client, log
 
 # Heartbeat cadence (seconds) by link type.
 _INTERVAL = {"wifi": 15, "lan": 15, "lte": 15, "none": 15}
@@ -126,7 +125,7 @@ def _handle_command(cmd: dict) -> None:
   try:
     proc = client.open_tunnel(config.get("host"), remote_port, ssh_port=int(config.get("ssh_port") or 22))
     _tunnels.append((proc, remote_port))
-    cloudlog.info(f"tylerpilot: opened reverse tunnel on server port {remote_port}")
+    log.info(f"opened reverse tunnel on server port {remote_port}")
   except Exception as e:
     config.set_error(f"tunnel failed: {e}")
 
@@ -139,7 +138,7 @@ def _ensure_server_key() -> None:
 
 
 def main() -> None:
-  cloudlog.info("tylerpilot agent starting")
+  log.info("agent starting")
   last_heartbeat = 0.0
   while True:
     try:
@@ -178,7 +177,7 @@ def main() -> None:
         config.set_error(str(e))
         time.sleep(5)
     except Exception as e:
-      cloudlog.warning(f"tylerpilot agent loop error: {e}")
+      log.warning(f"agent loop error: {e}")
       time.sleep(10)
 
 
