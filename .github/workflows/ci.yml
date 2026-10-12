@@ -1,0 +1,122 @@
+name: CI
+
+# The single CI definition for the TylerPilot fork (STANDARD §5). PR-only.
+#
+# Freeze-safe: this fork currently ships no build system (the root
+# `SConstruct`/`SConscript` are missing from the tree), so:
+#   - the `build` job is DEFERRED (see the job below), and
+#   - the Python jobs run a build-free subset.
+#
+# The fork's baseline is not lint-clean (inherited upstream files carry ruff /
+# codespell findings), so `lint` is scoped to the files a PR changes — the same
+# approach upstream's own scripts/lint/lint.sh uses for codespell. The test jobs
+# bypass the repo root `conftest.py` (it imports compiled modules: params_pyx.so,
+# msgq/ipc_pyx.so) via `--confcutdir` and install only pip-resolvable deps.
+#
+# Runners: all self-hosted (fleet-wide, zero GitHub minutes).
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  CI: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: pip install -r .github/ci-requirements.txt
+      - name: Lint changed files (ruff + codespell)
+        run: |
+          BASE_REF="${{ github.base_ref }}"
+          if [ -z "$BASE_REF" ]; then echo "not a pull_request run — nothing to diff"; exit 0; fi
+          git fetch --no-tags origin "$BASE_REF"
+          BASE="origin/$BASE_REF"
+          mapfile -t CHANGED < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD)
+          mapfile -t EXIST < <(printf '%s\n' "${CHANGED[@]}" | while read -r f; do [ -f "$f" ] && echo "$f"; done)
+          if [ ${#EXIST[@]} -eq 0 ]; then echo "no changed files"; exit 0; fi
+          mapfile -t PY < <(printf '%s\n' "${EXIST[@]}" | grep -E '\.py$' || true)
+          if [ ${#PY[@]} -gt 0 ]; then
+            echo "ruff:"; printf '  %s\n' "${PY[@]}"
+            ruff check "${PY[@]}"
+          fi
+          echo "codespell:"; printf '  %s\n' "${EXIST[@]}"
+          codespell "${EXIST[@]}" --ignore-words=.codespellignore
+
+  unit:
+    name: unit
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r .github/ci-requirements.txt
+      - name: Run pure-Python unit subset
+        # Build-free subset: only tests that import without compiled artifacts
+        # and do not pull a build-dependent conftest. Grows as the build returns.
+        run: |
+          pytest -o addopts="" --confcutdir=sunnypilot -m "not slow and not tici" \
+            sunnypilot/mapd/tests/test_mapd_version.py \
+            sunnypilot/selfdrive/selfdrived/tests/test_button_state_tracker.py
+
+  tylerpilot:
+    name: tylerpilot
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r .github/ci-requirements.txt
+      - name: Run TylerPilot unit tests
+        run: |
+          if [ ! -d sunnypilot/tylerpilot/tests ]; then
+            echo "no tylerpilot tests yet — skipping"
+            exit 0
+          fi
+          pytest -o addopts="" --confcutdir=sunnypilot sunnypilot/tylerpilot/tests
+
+  build:
+    name: build (deferred)
+    # DEFERRED — DO NOT ENABLE until the missing root `SConstruct`/`SConscript`
+    # are restored. Without them `scons` cannot build the main tree, so the
+    # C++/Cython build (and anything depending on it) is out of scope for now.
+    # Tracked as the firmware CI cutover blocker.
+    if: false
+    runs-on: [self-hosted, linux, x64, ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build (deferred)
+        run: echo "build deferred — root SConstruct missing"
