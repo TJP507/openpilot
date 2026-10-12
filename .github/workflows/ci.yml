@@ -119,4 +119,4 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Build (deferred)
-        run: echo "build deferred: root SConstruct missing"
+        run: echo "build deferred — root SConstruct missing"
