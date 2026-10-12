@@ -8,7 +8,6 @@ panel only writes the link state via sunnypilot/tylerpilot/config.py.
 """
 from __future__ import annotations
 
-import os
 import socket
 import threading
 

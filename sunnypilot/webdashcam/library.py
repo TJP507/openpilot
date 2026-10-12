@@ -220,7 +220,7 @@ def mp4_stream_command(src: str) -> list[str]:
   """ffmpeg argv that remuxes `src` to a fragmented MP4 on stdout (no temp file).
 
   Fragmented output is required: the result is streamed straight to the client,
-  so it must be playable before the muxer can seek back and finalise a header.
+  so it must be playable before the muxer can seek back and finalize a header.
   """
   cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostats"]
   if not src.endswith(".ts"):

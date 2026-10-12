@@ -82,7 +82,7 @@ def gather_stats() -> dict:
   except Exception:
     stats["version"] = ""
   try:
-    stats["uptime"] = int(time.time() - psutil.boot_time())
+    stats["uptime"] = int(time.time() - psutil.boot_time())  # noqa: TID251 — wall-clock uptime
   except Exception:
     pass
   temp = _cpu_temp()
