@@ -33,9 +33,9 @@ import pyray as rl
 
 from openpilot.common.basedir import BASEDIR
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.sunnypilot.webdashcam.library import CAMERAS, FFMPEG, PLAYER_FPS, SEGMENT_SECONDS, \
+from openpilot.sunnypilot.webdashcam.library import CAMERAS, PLAYER_FPS, \
                                                        Clip, list_clips, list_date_counts, segments_on_date, \
-                                                       segment_mtime, segment_cameras, delete_segments
+                                                       delete_segments
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached

@@ -172,7 +172,7 @@ def _tar(paths: list[str], blobs: dict[str, bytes] | None = None) -> bytes:
     for name, data in (blobs or {}).items():
       info = tarfile.TarInfo(name=name)
       info.size = len(data)
-      info.mtime = int(time.time())
+      info.mtime = int(time.time())  # noqa: TID251 — tar mtime is wall-clock
       t.addfile(info, io.BytesIO(data))
   return buf.getvalue()
 
@@ -227,7 +227,7 @@ def restore(payload: dict):
                                  config.get("fingerprint"), aid)
   # Safety: snapshot current state first.
   pre = _tar(D_INCLUDES)
-  pre_path = os.path.join(config.STATE_DIR, f"prerestore-{int(time.time())}.tgz")
+  pre_path = os.path.join(config.STATE_DIR, f"prerestore-{int(time.time())}.tgz")  # noqa: TID251 — filename timestamp
   try:
     with open(pre_path, "wb") as f:
       f.write(pre)

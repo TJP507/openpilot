@@ -8,10 +8,11 @@ name: CI
 #   - the Python jobs run a build-free subset.
 #
 # The fork's baseline is not lint-clean (inherited upstream files carry ruff /
-# codespell findings), so `lint` is scoped to the files a PR changes — the same
-# approach upstream's own scripts/lint/lint.sh uses for codespell. The test jobs
-# bypass the repo root `conftest.py` (it imports compiled modules: params_pyx.so,
-# msgq/ipc_pyx.so) via `--confcutdir` and install only pip-resolvable deps.
+# codespell findings), so `lint` is scoped to the fork's own directories
+# (`sunnypilot/` and `selfdrive/ui/sunnypilot/`); inherited upstream files are
+# left untouched. The test jobs bypass the repo root `conftest.py` (it imports
+# compiled modules: params_pyx.so, msgq/ipc_pyx.so) via `--confcutdir` and
+# install only pip-resolvable deps.
 #
 # Runners: all self-hosted (fleet-wide, zero GitHub minutes).
 
@@ -39,29 +40,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install linters
         run: pip install -r .github/ci-requirements.txt
-      - name: Lint changed files (ruff + codespell)
-        run: |
-          BASE_REF="${{ github.base_ref }}"
-          if [ -z "$BASE_REF" ]; then echo "not a pull_request run — nothing to diff"; exit 0; fi
-          git fetch --no-tags origin "$BASE_REF"
-          BASE="origin/$BASE_REF"
-          mapfile -t CHANGED < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD)
-          mapfile -t EXIST < <(printf '%s\n' "${CHANGED[@]}" | while read -r f; do [ -f "$f" ] && echo "$f"; done)
-          if [ ${#EXIST[@]} -eq 0 ]; then echo "no changed files"; exit 0; fi
-          mapfile -t PY < <(printf '%s\n' "${EXIST[@]}" | grep -E '\.py$' || true)
-          if [ ${#PY[@]} -gt 0 ]; then
-            echo "ruff:"; printf '  %s\n' "${PY[@]}"
-            ruff check "${PY[@]}"
-          fi
-          echo "codespell:"; printf '  %s\n' "${EXIST[@]}"
-          codespell "${EXIST[@]}" --ignore-words=.codespellignore
+      - name: ruff check (fork dirs)
+        run: ruff check sunnypilot selfdrive/ui/sunnypilot
+      - name: codespell (fork dirs)
+        run: codespell sunnypilot selfdrive/ui/sunnypilot --ignore-words=.codespellignore
 
   unit:
     name: unit

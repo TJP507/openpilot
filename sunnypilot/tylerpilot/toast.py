@@ -20,8 +20,10 @@ PATH = os.path.join(DIR, "tylerpilot_toast.json")
 def show(text: str, ttl: float = 8.0) -> None:
   try:
     os.makedirs(DIR, exist_ok=True)
+    # Wall-clock (not monotonic): the timestamp is persisted to disk and
+    # compared by a separate process (the UI).
     with open(PATH, "w") as f:
-      json.dump({"text": text[:200], "until": time.time() + ttl}, f)
+      json.dump({"text": text[:200], "until": time.time() + ttl}, f)  # noqa: TID251
   except OSError:
     pass
 
@@ -31,7 +33,7 @@ def current() -> str | None:
   try:
     with open(PATH) as f:
       d = json.load(f)
-    if float(d.get("until", 0)) > time.time():
+    if float(d.get("until", 0)) > time.time():  # noqa: TID251
       return str(d.get("text", ""))
   except (OSError, ValueError):
     pass

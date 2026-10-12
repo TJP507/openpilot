@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 import os
-import time
 
 from openpilot.sunnypilot.tylerpilot import log
 
@@ -96,12 +95,12 @@ def parse_route(route: str) -> dict | None:
             distance += _haversine((last_pos[0], last_pos[1]), (lat, lon))
           last_pos = (lat, lon)
       elif w == "carState":
-        v = getattr(m, "carState").vEgo
+        v = m.carState.vEgo
         speed_sum += v
         speed_n += 1
         max_speed = max(max_speed, v)
       elif w == "selfdriveState":
-        ss = getattr(m, "selfdriveState")
+        ss = m.selfdriveState
         if prev_t is not None and prev_enabled:
           engaged_s += t - prev_t
         prev_enabled = bool(ss.enabled)
@@ -110,7 +109,7 @@ def parse_route(route: str) -> dict | None:
           alerts += 1
         prev_alert = at
       elif w == "driverMonitoringState":
-        dm = getattr(m, "driverMonitoringState")
+        dm = m.driverMonitoringState
         if dm.alert and bool(getattr(dm, "isActive", False)) is False and dm.alert != 0:
           dm_events += 1
 
