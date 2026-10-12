@@ -1,0 +1,12 @@
+# act configuration for `make act` (local CI runs).
+#
+# Maps the self-hosted runner labels this workflow targets onto the standard
+# act image, and points act at a clean env-file + the gitignored `.secrets`
+# (never the repo's real `.env`).
+-P ubuntu-24.04=catthehacker/ubuntu:act-24.04
+-P self-hosted=catthehacker/ubuntu:act-24.04
+--container-architecture linux/amd64
+--secret-file .secrets
+--env-file .act-env
+--env ACT=true
+--artifact-server-path /tmp/act-artifacts

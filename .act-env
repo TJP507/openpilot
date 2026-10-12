@@ -1,0 +1,6 @@
+# Empty env-file for `act` runs.
+#
+# act's --env-file defaults to `.env`, which could inject this repo's real
+# environment into every act container. `.actrc` points --env-file here instead
+# so `make act` runs with a clean environment. Secrets for act go in the
+# gitignored `.secrets` (--secret-file), not here.

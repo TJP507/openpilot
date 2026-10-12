@@ -1,0 +1,22 @@
+# Build-free CI dependencies for the TylerPilot fork (pip-only).
+#
+# The fork currently ships no build system (root SConstruct missing), so the CI
+# Python jobs run a build-free subset and need only:
+#   - the linters, and
+#   - the pip-resolvable imports pulled in by the pure-Python test subset and the
+#     TylerPilot modules (`openpilot.system.hardware` -> cereal/pycapnp, etc.).
+#
+# Versions mirror uv.lock so CI matches the lockfile.
+ruff==0.15.16
+codespell==2.4.2
+pytest==9.0.3
+pytest-mock==3.15.1
+pycapnp==2.1.0
+zstandard==0.25.0
+numpy==2.4.6
+pyserial==3.5
+spidev==3.8
+pyzmq==27.1.0
+psutil==7.2.2
+requests==2.34.2
+tqdm==4.68.1
