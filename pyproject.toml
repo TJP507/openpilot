@@ -193,6 +193,10 @@ exclude = [
 ]
 lint.flake8-implicit-str-concat.allow-multiline = false
 
+# Long HTML/CSS/JS lines embedded in string literals (the web dash cam UI).
+[tool.ruff.lint.per-file-ignores]
+"sunnypilot/webdashcam/server.py" = ["E501"]
+
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "selfdrive".msg = "Use openpilot.selfdrive"
 "common".msg = "Use openpilot.common"
