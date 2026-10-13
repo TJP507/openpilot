@@ -19,8 +19,8 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
 
 1. Server web UI → **Add device** → copy the 12-digit code (valid 10 min).
 2. On the device: **Settings → Developer → TylerPilot Cloud → Link**, type the code.
-3. The device generates an ed25519 tunnel key, registers, installs the server's
-   login key into `/home/comma/.ssh/authorized_keys`, and starts heartbeating.
+3. The device registers over the pinned cert, installs the server's login key into
+   `/home/comma/.ssh/authorized_keys`, and starts heartbeating.
 
 ## Server address
 
@@ -28,8 +28,7 @@ Hardcoded for the PoC in `config.py`:
 
 ```python
 DEFAULT_HOST = "pilot-connect.tylerjp.com"
-DEFAULT_PORT = 8021  # API (TLS passthrough to the backend)
-DEFAULT_SSH_PORT = 8022  # reverse-SSH tunnel
+DEFAULT_PORT = 8021  # single port: device API + SSH-over-WebSocket tunnel
 ```
 
 ## Logs
@@ -43,10 +42,12 @@ so it never touches sunnypilot's logs:
 - Written by `log.py` (`info` / `warning` / `error`); the agent no longer sends
   its messages to `cloudlog`.
 
-## Remote SSH
+## Remote SSH (single port)
 
-When an admin clicks **SSH** in the web UI, the server queues a command with a
-loopback port; the agent's next poll opens
-`ssh -N -R 127.0.0.1:<port>:localhost:22 tunnel@<server>`. The server then
-bridges a browser terminal through it. The tunnel key is locked to
-`permitlisten="127.0.0.1:*"` and `no-pty` on the server.
+The device talks to the server over **one port** (`DEFAULT_PORT`): the device API
+(register/heartbeat/poll) *and* the SSH tunnel. When an admin clicks **SSH** in
+the web UI, the server queues an `ssh_request` with a session id; the agent's
+next poll opens a **WebSocket** to `wss://<server>:<port>/api/v1/device/ssh-bridge`
+on that same port and bridges it to this device's sshd (`localhost:22`). The
+server runs `ssh` against the bridged stream and pipes a browser terminal through
+it. No separate SSH port or reverse `ssh -R` is needed.

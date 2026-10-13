@@ -19,7 +19,6 @@ def test_defaults_when_missing(state):
   s = config.load()
   assert s["host"] == config.DEFAULT_HOST
   assert s["port"] == config.DEFAULT_PORT
-  assert s["ssh_port"] == config.DEFAULT_SSH_PORT
   assert s["linked"] is False
   assert s["token"] == ""
 

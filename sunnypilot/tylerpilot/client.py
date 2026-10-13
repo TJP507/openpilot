@@ -13,8 +13,10 @@ import hashlib
 import http.client
 import json
 import os
+import socket
 import ssl
 import subprocess
+import threading
 
 from . import config
 
@@ -202,19 +204,64 @@ def download_artifact(host: str, port: int, token: str, pin: str, artifact_id: s
   return data
 
 
-def open_tunnel(host: str, remote_port: int, ssh_port: int = 22, local_ssh_port: int = 22):
-  """Open a reverse tunnel 127.0.0.1:<remote_port> on the server -> this device's SSH."""
-  args = [
-    "ssh", "-N",
-    "-R", f"127.0.0.1:{remote_port}:localhost:{local_ssh_port}",
-    "-p", str(ssh_port),
-    "-i", config.TUNNEL_KEY_PATH,
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", f"UserKnownHostsFile={config.KNOWN_HOSTS_PATH}",
-    "-o", "ExitOnForwardFailure=yes",
-    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-    "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-    f"tunnel@{host}",
-  ]
-  return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          start_new_session=True)
+def bridge_ssh(host: str, port: int, token: str, pin: str, session: str,
+               local_ssh_port: int = 22) -> None:
+  """Single-port SSH-over-WebSocket bridge.
+
+  Opens a WebSocket to the server on the SAME host:port as the device API and
+  bridges it to this device's sshd, so the server reaches the device's SSH over
+  the one API port. Blocks until the bridge closes.
+  """
+  try:
+    import websocket  # websocket-client (already a sunnypilot dependency)
+  except ImportError as e:  # pragma: no cover
+    raise LinkError(f"websocket-client unavailable: {e}") from e
+
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE  # verified manually against the pinned fingerprint
+  url = f"wss://{host}:{port}/api/v1/device/ssh-bridge?session={session}"
+  ws = websocket.create_connection(
+    url, sslopt={"context": ctx}, timeout=15,
+    header=[f"Authorization: Bearer {token}"],
+  )
+  sshd = None
+  stop = threading.Event()
+  try:
+    der = ws.sock.getpeercert(binary_form=True)
+    if pin and _fingerprint(der) != pin:
+      raise PinError("server certificate does not match the pinned fingerprint")
+
+    sshd = socket.create_connection(("127.0.0.1", local_ssh_port), timeout=15)
+
+    def _sshd_to_ws() -> None:
+      try:
+        while not stop.is_set():
+          data = sshd.recv(32768)
+          if not data:
+            break
+          ws.send_binary(data)
+      except Exception:
+        pass
+      finally:
+        stop.set()
+
+    pump = threading.Thread(target=_sshd_to_ws, daemon=True)
+    pump.start()
+    try:
+      while not stop.is_set():
+        data = ws.recv()
+        if isinstance(data, str):
+          data = data.encode()
+        if not data:
+          break
+        sshd.sendall(data)
+    finally:
+      stop.set()
+      pump.join(timeout=2)
+  finally:
+    for closer in (lambda: sshd and sshd.close(), ws.close):
+      try:
+        closer()
+      except Exception:
+        pass

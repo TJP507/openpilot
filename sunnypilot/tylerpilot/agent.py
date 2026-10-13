@@ -8,7 +8,7 @@ traffic minimal, especially on LTE.
 """
 from __future__ import annotations
 
-import subprocess
+import threading
 import time
 
 import psutil
@@ -21,7 +21,7 @@ from openpilot.sunnypilot.tylerpilot import config, client, log, actions
 # Heartbeat cadence (seconds) by link type.
 _INTERVAL = {"wifi": 15, "lan": 15, "lte": 15, "none": 15}
 
-_tunnels: list[tuple[subprocess.Popen, int]] = []
+_bridges: dict = {}
 
 
 def _active_iface() -> str:
@@ -99,9 +99,9 @@ def gather_stats() -> dict:
   return stats
 
 
-def _reap_tunnels() -> None:
-  global _tunnels
-  _tunnels = [(p, port) for p, port in _tunnels if p.poll() is None]
+def _reap_bridges() -> None:
+  global _bridges
+  _bridges = {sid: t for sid, t in _bridges.items() if t.is_alive()}
 
 
 def _handle_command(cmd: dict) -> None:
@@ -113,27 +113,28 @@ def _handle_command(cmd: dict) -> None:
 
 
 def _handle_ssh(cmd: dict) -> None:
-  _reap_tunnels()
-  remote_port = int(cmd.get("port"))
-
-  # Already have a live tunnel on the requested port — nothing to do.
-  if any(port == remote_port for _proc, port in _tunnels):
+  """Open a single-port SSH-over-WebSocket bridge for the requested session."""
+  _reap_bridges()
+  session = str(cmd.get("session") or "")
+  if not session or session in _bridges:
     return
+  host = config.get("host")
+  token = config.get("token")
+  pin = config.get("fingerprint")
+  if not (host and token):
+    return
+  port = int(config.get("port"))
 
-  # Replace any tunnel on a different (stale) port.
-  for proc, _port in _tunnels:
+  def _run() -> None:
     try:
-      proc.kill()
-    except Exception:
-      pass
-  _tunnels.clear()
+      client.bridge_ssh(host, port, token, pin, session)
+    except Exception as e:
+      config.set_error(f"tunnel failed: {e}")
 
-  try:
-    proc = client.open_tunnel(config.get("host"), remote_port, ssh_port=int(config.get("ssh_port") or 22))
-    _tunnels.append((proc, remote_port))
-    log.info(f"opened reverse tunnel on server port {remote_port}")
-  except Exception as e:
-    config.set_error(f"tunnel failed: {e}")
+  t = threading.Thread(target=_run, daemon=True)
+  _bridges[session] = t
+  t.start()
+  log.info(f"opened ssh bridge {session[:8]}")
 
 
 def _run_job(cmd: dict) -> None:
