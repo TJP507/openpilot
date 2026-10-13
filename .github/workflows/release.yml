@@ -1,0 +1,54 @@
+name: release
+
+# Signed-release skeleton for the TylerPilot fork.
+#
+# DISABLED until the build system is restored: the root `SConstruct`/
+# `SConscript` are missing, so the stripped tree cannot be built yet. Every job
+# is gated with `if: false`. See `docs/tylerpilot-ota.md` for the design.
+#
+# Intended flow (on a signed tag on release-c3x):
+#   build stripped tree -> emit release.json -> sign it -> publish a GitHub Release.
+#
+# No promotion and no OTA execution happen from this workflow.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write  # keyless signing (Sigstore/cosign), if option A is chosen
+
+jobs:
+  release:
+    name: build + sign + publish (deferred)
+    # DEFERRED — DO NOT ENABLE until the build system (root SConstruct) returns.
+    if: false
+    runs-on: [self-hosted, linux, x64, ci]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build stripped tree
+        run: |
+          # TODO(build): tools/release/build_stripped.sh once SConstruct is restored.
+          echo "deferred: build system missing"
+          exit 1
+      - name: Emit release manifest
+        run: |
+          # TODO: write release.json (channel, version, commit, tree_hash, rollout).
+          echo "deferred: manifest generation"
+      - name: Sign manifest
+        run: |
+          # Option A (keyless):  cosign sign-blob --yes release.json > release.json.sig
+          # Option B (Ed25519):  sign release.json with the key unsealed from bws.
+          echo "deferred: signing"
+      - name: Publish GitHub Release
+        run: |
+          # gh release create "$GITHUB_REF_NAME" --target release-c3x \
+          #   --title "$GITHUB_REF_NAME" --notes-file RELEASES.md \
+          #   release.json release.json.sig
+          echo "deferred: publish"
