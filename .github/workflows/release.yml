@@ -1,54 +1,68 @@
 name: release
 
-# Signed-release skeleton for the TylerPilot fork.
+# Signed-release pipeline for the TylerPilot fork.
 #
-# DISABLED until the build system is restored: the root `SConstruct`/
-# `SConscript` are missing, so the stripped tree cannot be built yet. Every job
-# is gated with `if: false`. See `docs/tylerpilot-ota.md` for the design.
+# Builds the tree and packages a `prebuilt.tar.gz` release artifact (mirrors
+# upstream `sunnypilot-build-prebuilt.yaml`'s build stage). Signing is the next
+# step and is NOT yet implemented — see `docs/tylerpilot-ota.md` §6: the agreed
+# mechanism is a pinned Ed25519 key held in `bws`, with the public key shipped
+# in the firmware. Until that lands this workflow produces an UNSIGNED artifact
+# and does not publish anything.
 #
-# Intended flow (on a signed tag on release-c3x):
-#   build stripped tree -> emit release.json -> sign it -> publish a GitHub Release.
-#
-# No promotion and no OTA execution happen from this workflow.
+# NOTE: the default runner below is x64, so it produces x64 artifacts and is
+# useful for validating the pipeline. Device (comma 3X) releases need an
+# aarch64 runner — upstream builds on `[self-hosted, tici]`. No such runner is
+# registered for this fork yet.
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write  # keyless signing (Sigstore/cosign), if option A is chosen
+  contents: read
 
 jobs:
-  release:
-    name: build + sign + publish (deferred)
-    # DEFERRED — DO NOT ENABLE until the build system (root SConstruct) returns.
-    if: false
+  build:
+    name: build + package
     runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build stripped tree
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync Python environment
+        run: uv sync
+      - name: Build
         run: |
-          # TODO(build): tools/release/build_stripped.sh once SConstruct is restored.
-          echo "deferred: build system missing"
-          exit 1
-      - name: Emit release manifest
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:$PWD/msgq_repo:$PWD/opendbc_repo:$PWD/rednose_repo:$PWD/tinygrad_repo"
+          scons --minimal -j"$(nproc)"
+      - name: Package release tree
+        # Strip transient build files (mirrors upstream's strip stage); keep
+        # compiled libs/executables and the tinygrad pkl models.
         run: |
-          # TODO: write release.json (channel, version, commit, tree_hash, rollout).
-          echo "deferred: manifest generation"
-      - name: Sign manifest
-        run: |
-          # Option A (keyless):  cosign sign-blob --yes release.json > release.json.sig
-          # Option B (Ed25519):  sign release.json with the key unsealed from bws.
-          echo "deferred: signing"
-      - name: Publish GitHub Release
-        run: |
-          # gh release create "$GITHUB_REF_NAME" --target release-c3x \
-          #   --title "$GITHUB_REF_NAME" --notes-file RELEASES.md \
-          #   release.json release.json.sig
-          echo "deferred: publish"
+          find . -name '*.a' -delete
+          find . -name '*.o' -delete
+          find . -name '*.os' -delete
+          find . -name '*.pyc' -delete
+          find . -name '__pycache__' -type d -exec rm -rf {} + || true
+          rm -f selfdrive/modeld/models/*.onnx
+          tar czf prebuilt.tar.gz --exclude=.venv --exclude=.git .
+          ls -la prebuilt.tar.gz
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt
+          path: prebuilt.tar.gz
+          compression-level: 0
+
+  # TODO(sign): after build, emit release.json (channel, version, commit,
+  # tree_hash, min_agnos, rollout) and sign it with the pinned Ed25519 key
+  # unsealed from bws; attach release.json + release.json.sig to a GitHub
+  # Release. See docs/tylerpilot-ota.md §3.1–3.2.

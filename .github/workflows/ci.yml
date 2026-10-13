@@ -2,10 +2,9 @@ name: CI
 
 # The single CI definition for the TylerPilot fork (STANDARD §5). PR-only.
 #
-# Freeze-safe: this fork currently ships no build system (the root
-# `SConstruct`/`SConscript` are missing from the tree), so:
-#   - the `build` job is DEFERRED (see the job below), and
-#   - the Python jobs run a build-free subset.
+# The build system is restored (root `SConstruct`/`SConscript` + ONNX models),
+# so `build` runs a real `scons --minimal` on x64. The Python jobs still run a
+# build-free subset for speed.
 #
 # The fork's baseline is not lint-clean (inherited upstream files carry ruff /
 # codespell findings), so `lint` is scoped to the fork's own directories
@@ -96,15 +95,31 @@ jobs:
           pytest -o addopts="" --confcutdir=sunnypilot sunnypilot/tylerpilot/tests
 
   build:
-    name: build (deferred)
-    # DEFERRED — DO NOT ENABLE until the missing root `SConstruct`/`SConscript`
-    # are restored. Without them `scons` cannot build the main tree, so the
-    # C++/Cython build (and anything depending on it) is out of scope for now.
-    # Tracked as the firmware CI cutover blocker.
-    if: false
+    name: build
+    # The build system (root SConstruct/SConscript + ONNX models) is restored
+    # from sunnypilot master c440933a65 (see the restore commit). This job
+    # builds the tree on x64 to prove the graph is valid and produces the
+    # Cython/C++ artifacts. Device (aarch64) release artifacts are built by
+    # `.github/workflows/release.yml` on a device runner.
     runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build (deferred)
-        run: echo "build deferred — root SConstruct missing"
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync Python environment
+        run: uv sync
+      - name: Build (scons --minimal)
+        # capnpc/cython live in .venv/bin, so activate before invoking scons.
+        run: |
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:$PWD/msgq_repo:$PWD/opendbc_repo:$PWD/rednose_repo:$PWD/tinygrad_repo"
+          scons --minimal -j"$(nproc)"
+      - name: Verify key artifacts
+        run: |
+          test -f common/params_pyx.so
+          test -f msgq_repo/msgq/ipc_pyx.so
+          test -f msgq_repo/msgq/visionipc/visionipc_pyx.so
