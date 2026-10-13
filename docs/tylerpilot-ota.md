@@ -3,7 +3,8 @@
 > **Status: design / prep only.** No promotion, no OTA execution. This document
 > defines the target OTA/release architecture for the TylerPilot fork and the
 > steps to get there. It is a commitment-time design, not a runbook that has been
-> exercised on a device.
+> exercised on a device. The §6 decisions are **settled** (recorded below); the
+> remaining work is implementation, gated on the build system (now restored).
 >
 > Companion: `AGENTS.md` (channel + release flow), `docs/cutover-runbook.md`
 > (the *server* cutover — a different system).
@@ -52,10 +53,19 @@
 - Upstream `sunnypilot` builds a **stripped branch** (`tools/release/build_stripped.sh`)
   and OTA is branch-based — **no artifact signing** upstream either.
 
-### 1.5 Blocker
-- The fork has **no build system** (root `SConstruct`/`SConscript` missing), so a
-  release workflow **cannot produce a real artifact yet** (CI `build` job is
-  deferred). Everything below is designed to slot in once the build returns.
+### 1.5 Build system — RESOLVED
+- **Root cause:** the fork's branches were cut from a sunnypilot **prebuilt
+  branch** (`release-tizi-staging` @ `831d268e85`, tree == the fork snapshot root
+  `6a17f75c6b`). A prebuilt branch is a **stripped build output**: upstream's
+  `sunnypilot-build-prebuilt.yaml` deletes `SConstruct`, every `SConscript` and
+  the `*.onnx` models, then adds an empty `prebuilt` marker. So the build
+  entrypoint was absent **by construction**, and `launch_chffrplus.sh` skips
+  `system/manager/build.py` whenever the marker is present.
+- **Fix:** the build system was restored from the sunnypilot master commit the
+  staging tree was built from (`c440933a65` == tag `v2026.002.002`): `SConstruct`
+  + 18 `SConscript` files + the three ONNX models (real LFS content), and the
+  stale `prebuilt` marker dropped. The CI `build` job and `release.yml` now run a
+  real `scons` build.
 
 ---
 
@@ -96,39 +106,39 @@ On a signed tag `v<version>` on `release-c3x`, a `release.yml` workflow:
 > before applying. This is the smallest change that adds real trust without
 > replacing the branch-based OTA.
 
-### 3.2 Signing (two options — decide in §6)
-- **A. Keyless (Sigstore/cosign + GitHub OIDC).** The workflow signs the manifest
-  with a short-lived OIDC cert; the device verifies against the Sigstore root +
-  an identity policy (our repo/workflow). No long-lived key to store. Best
-  hygiene; requires the device to ship a cosign/Sigstore verifier.
-- **B. Pinned offline key (Ed25519).** Generate a signing key pair offline; the
-  **public** key is pinned in the firmware; the **private** key lives in `bws`
-  and is only unsealed in the release workflow. Simpler to verify on-device
-  (a small Ed25519 check); key custody is the risk.
+### 3.2 Signing — **DECIDED: pinned Ed25519 key in `bws`**
+- **DECISION:** **B. Pinned offline key (Ed25519).** Generate a signing key pair
+  offline; the **public** key is pinned in the firmware; the **private** key lives
+  in `bws` and is only unsealed in the release workflow. This matches KvmCloud and
+  is consistent fleet-wide. Sigstore keyless is a **later** option.
+- *(Rejected for now)* **A. Keyless (Sigstore/cosign + GitHub OIDC)** — no
+  long-lived key, but requires shipping a cosign/Sigstore verifier on-device.
 
-**Recommendation:** **B for the first cut** (trivial on-device verification,
-matches the existing `certs`/`secretbox` primitives), with a migration path to
-**A**. The pinned public key ships in `sunnypilot/tylerpilot/` and is what the
-agent's update path checks.
+The pinned public key ships in `sunnypilot/tylerpilot/` and is what the agent's
+update path checks.
 
-### 3.3 Channel & staged rollout
+### 3.3 Channel & staged rollout — **DECIDED: `stable`/`beta`, admin-set per device**
+- **DECISION:** two channels, **`stable`** and **`beta`**, with the channel
+  **set per device by an admin** (matches KVM's channel model). Percent/ring
+  rollout is a **later** refinement.
 - **Channels stay git branches** (`dev-c3x`/`staging-c3x`/`release-c3x`) for
-  integration and pre-release testing.
-- **Staged rollout** is driven by the **signed manifest's `rollout` field**, not
-  by branch moves (a branch move is all-or-nothing and ships instantly):
-  - Each device has a stable **ring** assignment (e.g., derived from a hash of
-    its device id → `canary`/`beta`/`stable`) or a **percent** gate.
-  - The agent fetches the manifest for its channel, verifies the signature, and
-    applies **only if** `ring ∈ manifest.rollout.rings` (or
-    `hash(device_id) % 100 < percent`).
-  - **Pausing** = publish a new manifest with `percent: 0` (or remove the ring).
-- This gives gradual rollout and a kill-switch without touching git.
+  integration and pre-release testing; the device's `stable`/`beta` selection
+  picks which published branch/manifest it tracks.
+- *(Later)* **Staged rollout** driven by the **signed manifest's `rollout`
+  field** — a stable **ring** assignment (hash of device id → `canary`/`beta`/
+  `stable`) or a **percent** gate; the agent applies only if
+  `ring ∈ manifest.rollout.rings` (or `hash(device_id) % 100 < percent`).
+  **Pausing** = publish a manifest with `percent: 0` (or drop the ring).
 
-### 3.4 Device update path (target)
+### 3.4 Device update path (target) — **DECIDED: fix `update()` to use the stock updater**
+- **DECISION:** the TylerPilot `update()` action is **fixed to route through the
+  stock `updated`** (or to replicate its OverlayFS + `.overlay_consistent`/
+  `.overlay_init` contract). The current raw `git checkout -f` into the live tree
+  is an integrity gap and likely never activates; it is removed.
 ```
 agent → fetch release.json (+ .sig) for channel
       → verify signature against pinned key
-      → check ring/percent gate
+      → check channel (stable/beta) gate
       → hand off to stock updated (branch fetch + overlay + finalize)
       → boot swap activates; old_openpilot retained for rollback
 ```
@@ -172,24 +182,25 @@ No more raw `checkout -f` into the live tree.
 | # | Item | Depends on |
 |---|---|---|
 | D1 | This design doc | — |
-| D2 | `release.yml` (build → manifest → sign → Release), **disabled** until the build is restored | build (SConstruct) |
-| D3 | Signed-manifest verifier + ring gate in the agent (replaces the raw `update()` bypass) | signing choice (§6) |
+| D2 | `release.yml` (build → manifest → sign → Release) | build (SConstruct) |
+| D3 | Signed-manifest verifier + channel gate in the agent (replaces the raw `update()` bypass) | signing (§6) |
 | D4 | Pinned public key in firmware; private key in `bws` | principal |
-| D5 | Rollback drill on one device (staging ring) | a device + staging promotion |
+| D5 | Rollback drill on one device (staging channel) | a device + staging promotion |
 
-D1 ships now. D2 ships as a **skeleton** (see `.github/workflows/release.yml`,
-`if: false`). D3–D5 wait on §6 + the build.
+D1 shipped. The build system is **restored** (root `SConstruct`/`SConscript` +
+ONNX models; see the restore commit) and `release.yml` now **builds and packages**
+`prebuilt.tar.gz`. Remaining: D2's signing step, and D3–D5.
 
 ---
 
-## 6. Open decisions (principal)
+## 6. Decisions (settled)
 
-1. **Signing:** keyless Sigstore (A) vs pinned Ed25519 key in `bws` (B)?
-   (Recommendation: B first.)
-2. **Rings:** what ring/percent scheme and how are devices assigned (device-id
-   hash vs an explicit `Ring` param)?
-3. **Trust scope:** verify only the **manifest** (code still trusted via git
-   branch) — or move to **signed artifacts** wholesale?
-4. **`update()` action:** fix it to route through the stock `updated`
-   (recommended), or remove it?
-5. **AGNOS coupling:** any minimum-AGNOS requirement to encode in the manifest?
+1. **Signing:** **pinned Ed25519 key in `bws`** (matches KvmCloud; consistent
+   fleet-wide). Sigstore keyless is a later option. → §3.2
+2. **Channels:** **`stable`/`beta`, admin-set per device** (matches KVM's
+   channel model). Percent/ring rollout is a later refinement. → §3.3
+3. **Trust scope:** **verify the manifest only** for now (code still trusted via
+   git); signed artifacts wholesale is a later option.
+4. **`update()` action:** **fix it to route through the stock `updated`** (the
+   raw bypass is an integrity gap and likely never activates). → §3.4
+5. **Min-AGNOS:** **encode the minimum AGNOS version in the manifest.**
