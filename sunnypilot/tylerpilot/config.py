@@ -29,9 +29,13 @@ DEVICE_SSH_USER = "comma"
 
 # Server address. TCP-passthrough endpoint (the reverse proxy forwards raw TLS
 # to the backend, so the device sees our pinned self-signed cert). A single port
-# carries both the device API and the SSH-over-WebSocket tunnel.
+# carries both the device API and the SSH-over-WebSocket tunnel. 443 is used
+# because restrictive networks allow it far more often than the old 8021.
 DEFAULT_HOST = "pilot-connect.tylerjp.com"
-DEFAULT_PORT = 8021
+DEFAULT_PORT = 443
+
+# The previous hardcoded default; linked devices are migrated off it on load.
+_LEGACY_DEFAULT_PORT = 8021
 
 _LOCK = threading.Lock()
 
@@ -59,6 +63,9 @@ def load() -> dict:
     data = {}
   out = dict(_DEFAULTS)
   out.update({k: data[k] for k in _DEFAULTS if k in data})
+  # Migrate linked devices off the previous hardcoded default port.
+  if out.get("port") == _LEGACY_DEFAULT_PORT and DEFAULT_PORT != _LEGACY_DEFAULT_PORT:
+    out["port"] = DEFAULT_PORT
   return out
 
 

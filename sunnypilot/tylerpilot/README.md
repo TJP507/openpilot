@@ -28,8 +28,12 @@ Hardcoded for the PoC in `config.py`:
 
 ```python
 DEFAULT_HOST = "pilot-connect.tylerjp.com"
-DEFAULT_PORT = 8021  # single port: device API + SSH-over-WebSocket tunnel
+DEFAULT_PORT = 443  # single port: device API + SSH-over-WebSocket tunnel
 ```
+
+The reverse proxy SNI-routes `pilot-connect.tylerjp.com` on 443 as raw TCP
+(no TLS termination, so the device still sees the pinned cert). 443 is used
+because restrictive networks allow it far more often than the old 8021.
 
 ## Logs
 

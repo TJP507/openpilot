@@ -52,6 +52,11 @@ def test_set_server(state):
   assert s["port"] == 1234
 
 
+def test_migrates_legacy_default_port(state):
+  config.set_server(config.DEFAULT_HOST, config._LEGACY_DEFAULT_PORT)
+  assert config.load()["port"] == config.DEFAULT_PORT
+
+
 def test_corrupt_json_falls_back_to_defaults(state):
   with open(config.STATE_PATH, "w") as f:
     f.write("{not valid json")
