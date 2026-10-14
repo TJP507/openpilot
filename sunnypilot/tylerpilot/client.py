@@ -9,6 +9,7 @@ later connection.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import json
@@ -16,7 +17,6 @@ import os
 import socket
 import ssl
 import subprocess
-import threading
 
 from . import config
 
@@ -211,57 +211,79 @@ def bridge_ssh(host: str, port: int, token: str, pin: str, session: str,
   Opens a WebSocket to the server on the SAME host:port as the device API and
   bridges it to this device's sshd, so the server reaches the device's SSH over
   the one API port. Blocks until the bridge closes.
+
+  Uses asyncio + aiohttp (rather than websocket-client) so both directions are
+  driven by one event loop with proper flow control; the previous two-thread
+  websocket-client model dropped large sustained transfers.
   """
   try:
-    import websocket  # websocket-client (already a sunnypilot dependency)
+    import aiohttp
   except ImportError as e:  # pragma: no cover
-    raise LinkError(f"websocket-client unavailable: {e}") from e
+    raise LinkError(f"aiohttp unavailable: {e}") from e
 
+  if pin:
+    _verify_pin(host, port, pin)
+  asyncio.run(_bridge_loop(aiohttp, host, port, token, session, local_ssh_port))
+
+
+def _verify_pin(host: str, port: int, pin: str) -> None:
+  """Verify the server presents the pinned certificate (TOFU trust anchor)."""
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE  # verified manually against the pinned fingerprint
+  with socket.create_connection((host, port), timeout=15) as raw:
+    with ctx.wrap_socket(raw, server_hostname=host) as tls:
+      der = tls.getpeercert(binary_form=True)
+  if _fingerprint(der) != pin:
+    raise PinError("server certificate does not match the pinned fingerprint")
+
+
+async def _bridge_loop(aiohttp, host: str, port: int, token: str, session: str,
+                       local_ssh_port: int) -> None:
   ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
   ctx.check_hostname = False
   ctx.verify_mode = ssl.CERT_NONE  # verified manually against the pinned fingerprint
   url = f"wss://{host}:{port}/api/v1/device/ssh-bridge?session={session}"
-  ws = websocket.create_connection(
-    url, sslopt={"context": ctx}, timeout=15,
-    header=[f"Authorization: Bearer {token}"],
-  )
-  sshd = None
-  stop = threading.Event()
-  try:
-    der = ws.sock.getpeercert(binary_form=True)
-    if pin and _fingerprint(der) != pin:
-      raise PinError("server certificate does not match the pinned fingerprint")
+  timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
+  async with aiohttp.ClientSession(timeout=timeout) as cs:
+    async with cs.ws_connect(
+      url, ssl=ctx, headers={"Authorization": f"Bearer {token}"}, max_msg_size=0,
+    ) as ws:
+      reader, writer = await asyncio.open_connection("127.0.0.1", local_ssh_port)
 
-    sshd = socket.create_connection(("127.0.0.1", local_ssh_port), timeout=15)
+      async def sshd_to_ws() -> None:
+        try:
+          while True:
+            data = await reader.read(65536)
+            if not data:
+              break
+            await ws.send_bytes(data)
+        except Exception:
+          pass
+        finally:
+          await ws.close()
 
-    def _sshd_to_ws() -> None:
+      async def ws_to_sshd() -> None:
+        try:
+          async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+              writer.write(msg.data)
+              await writer.drain()
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                              aiohttp.WSMsgType.ERROR):
+              break
+        except Exception:
+          pass
+        finally:
+          try:
+            writer.close()
+          except Exception:
+            pass
+
       try:
-        while not stop.is_set():
-          data = sshd.recv(32768)
-          if not data:
-            break
-          ws.send_binary(data)
-      except Exception:
-        pass
+        await asyncio.gather(sshd_to_ws(), ws_to_sshd())
       finally:
-        stop.set()
-
-    pump = threading.Thread(target=_sshd_to_ws, daemon=True)
-    pump.start()
-    try:
-      while not stop.is_set():
-        data = ws.recv()
-        if isinstance(data, str):
-          data = data.encode()
-        if not data:
-          break
-        sshd.sendall(data)
-    finally:
-      stop.set()
-      pump.join(timeout=2)
-  finally:
-    for closer in (lambda: sshd and sshd.close(), ws.close):
-      try:
-        closer()
-      except Exception:
-        pass
+        try:
+          writer.close()
+        except Exception:
+          pass
