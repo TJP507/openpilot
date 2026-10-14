@@ -19,7 +19,6 @@ def test_defaults_when_missing(state):
   s = config.load()
   assert s["host"] == config.DEFAULT_HOST
   assert s["port"] == config.DEFAULT_PORT
-  assert s["ssh_port"] == config.DEFAULT_SSH_PORT
   assert s["linked"] is False
   assert s["token"] == ""
 
@@ -51,6 +50,12 @@ def test_set_server(state):
   s = config.load()
   assert s["host"] == "example.com"
   assert s["port"] == 1234
+
+
+def test_migrates_legacy_default_port(state):
+  for old in config._LEGACY_DEFAULT_PORTS:
+    config.set_server(config.DEFAULT_HOST, old)
+    assert config.load()["port"] == config.DEFAULT_PORT
 
 
 def test_corrupt_json_falls_back_to_defaults(state):

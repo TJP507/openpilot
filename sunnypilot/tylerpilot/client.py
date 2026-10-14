@@ -9,10 +9,12 @@ later connection.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import json
 import os
+import socket
 import ssl
 import subprocess
 
@@ -202,19 +204,86 @@ def download_artifact(host: str, port: int, token: str, pin: str, artifact_id: s
   return data
 
 
-def open_tunnel(host: str, remote_port: int, ssh_port: int = 22, local_ssh_port: int = 22):
-  """Open a reverse tunnel 127.0.0.1:<remote_port> on the server -> this device's SSH."""
-  args = [
-    "ssh", "-N",
-    "-R", f"127.0.0.1:{remote_port}:localhost:{local_ssh_port}",
-    "-p", str(ssh_port),
-    "-i", config.TUNNEL_KEY_PATH,
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", f"UserKnownHostsFile={config.KNOWN_HOSTS_PATH}",
-    "-o", "ExitOnForwardFailure=yes",
-    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-    "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-    f"tunnel@{host}",
-  ]
-  return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          start_new_session=True)
+def bridge_ssh(host: str, port: int, token: str, pin: str, session: str,
+               local_ssh_port: int = 22) -> None:
+  """Single-port SSH-over-WebSocket bridge.
+
+  Opens a WebSocket to the server on the SAME host:port as the device API and
+  bridges it to this device's sshd, so the server reaches the device's SSH over
+  the one API port. Blocks until the bridge closes.
+
+  Uses asyncio + aiohttp (rather than websocket-client) so both directions are
+  driven by one event loop with proper flow control; the previous two-thread
+  websocket-client model dropped large sustained transfers.
+  """
+  try:
+    import aiohttp
+  except ImportError as e:  # pragma: no cover
+    raise LinkError(f"aiohttp unavailable: {e}") from e
+
+  if pin:
+    _verify_pin(host, port, pin)
+  asyncio.run(_bridge_loop(aiohttp, host, port, token, session, local_ssh_port))
+
+
+def _verify_pin(host: str, port: int, pin: str) -> None:
+  """Verify the server presents the pinned certificate (TOFU trust anchor)."""
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE  # verified manually against the pinned fingerprint
+  with socket.create_connection((host, port), timeout=15) as raw:
+    with ctx.wrap_socket(raw, server_hostname=host) as tls:
+      der = tls.getpeercert(binary_form=True)
+  if _fingerprint(der) != pin:
+    raise PinError("server certificate does not match the pinned fingerprint")
+
+
+async def _bridge_loop(aiohttp, host: str, port: int, token: str, session: str,
+                       local_ssh_port: int) -> None:
+  ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE  # verified manually against the pinned fingerprint
+  url = f"wss://{host}:{port}/api/v1/device/ssh-bridge?session={session}"
+  timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
+  async with aiohttp.ClientSession(timeout=timeout) as cs:
+    async with cs.ws_connect(
+      url, ssl=ctx, headers={"Authorization": f"Bearer {token}"}, max_msg_size=0,
+    ) as ws:
+      reader, writer = await asyncio.open_connection("127.0.0.1", local_ssh_port)
+
+      async def sshd_to_ws() -> None:
+        try:
+          while True:
+            data = await reader.read(65536)
+            if not data:
+              break
+            await ws.send_bytes(data)
+        except Exception:
+          pass
+        finally:
+          await ws.close()
+
+      async def ws_to_sshd() -> None:
+        try:
+          async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+              writer.write(msg.data)
+              await writer.drain()
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                              aiohttp.WSMsgType.ERROR):
+              break
+        except Exception:
+          pass
+        finally:
+          try:
+            writer.close()
+          except Exception:
+            pass
+
+      try:
+        await asyncio.gather(sshd_to_ws(), ws_to_sshd())
+      finally:
+        try:
+          writer.close()
+        except Exception:
+          pass
