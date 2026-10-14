@@ -9,6 +9,7 @@ later connection.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import json
@@ -216,7 +217,6 @@ def bridge_ssh(host: str, port: int, token: str, pin: str, session: str,
   websocket-client model dropped large sustained transfers.
   """
   try:
-    import asyncio
     import aiohttp
   except ImportError as e:  # pragma: no cover
     raise LinkError(f"aiohttp unavailable: {e}") from e
