@@ -54,3 +54,24 @@ next poll opens a **WebSocket** to `wss://<server>:<port>/api/v1/device/ssh-brid
 on that same port and bridges it to this device's sshd (`localhost:22`). The
 server runs `ssh` against the bridged stream and pipes a browser terminal through
 it. No separate SSH port or reverse `ssh -R` is needed.
+
+## Remote actions
+
+The server can queue jobs that the agent picks up on the same long-poll (as
+`{"type":"job"}`) and runs via `actions.py`:
+
+- **Power / manager** — `reboot`, `poweroff`, `restart_manager`.
+- **Params** — `param_get`, `param_set`.
+- **Update** — `update` (switch the git checkout to a TylerPilot channel).
+- **Telemetry** — `location`, `trips` (parsed locally; only the compact summary
+  is uploaded, never raw logs).
+- **Settings** — `backup` and `restore`. `backup` tars `/data/params/d` +
+  `/data/community` and uploads it as an artifact; `restore` pulls a previously
+  uploaded artifact back down (via `GET /api/v1/device/artifact?id=…`), snapshots
+  the current state first, then extracts it. `diagnostics` produces a support
+  bundle (dmesg/journal/network/ps/… + a swaglog tail).
+
+Each handler returns `(ok, result, artifact?)`; the agent reports back with
+`POST /api/v1/device/job_result`, and the server stores any artifact for the
+web UI to download.
+
