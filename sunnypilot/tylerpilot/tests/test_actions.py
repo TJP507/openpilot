@@ -138,6 +138,18 @@ def test_diagnostics_returns_tarball(monkeypatch):
   assert len(base64.b64decode(artifact["data"])) > 0
 
 
+def test_diagnostics_excludes_settings(monkeypatch):
+  import io
+  import tarfile
+
+  monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, "output"))
+  _, _, artifact = actions.diagnostics({})
+  with tarfile.open(fileobj=io.BytesIO(base64.b64decode(artifact["data"])), mode="r:gz") as t:
+    names = t.getnames()
+  assert names and all(n.startswith("diag/") for n in names)
+  assert not any(n.startswith(("data/params", "data/community")) for n in names)
+
+
 def test_restore_requires_artifact_id():
   ok, msg, _ = actions.restore({})
   assert ok is False and msg == "no artifact id"
