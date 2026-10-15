@@ -133,7 +133,7 @@ DENYLIST: dict[str, str] = {
   "DisableUpdates": "Blocks over-the-air updates; device fleet management, not a user setting.",
   "EnableCopyparty": "Runs a Copyparty file server (network/service exposure); per device.",
   "EnableGithubRunner": "Runs a GitHub Actions runner (network/service exposure); per device.",
-  "ExperimentalModeConfirmed": "Safety acknowledgement that must be accepted per device.",
+  "ExperimentalModeConfirmed": "Safety acknowledgment that must be accepted per device.",
   "GithubSshKeys": "SSH keys are a credential; never copied between devices.",
   "GithubUsername": "Account identity; not a device setting.",
   "LiveDelay": "Per-device audio calibration captured on this hardware.",
