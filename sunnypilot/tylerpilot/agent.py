@@ -27,7 +27,15 @@ _REVOKED_BACKOFF = 60  # a revoked device only re-checks slowly for a new token
 _ERROR_SLEEP = 5
 _OUTER_ERROR_SLEEP = 10
 
+# A 401 only confirms revocation after this many consecutive of our own
+# "unauthenticated" responses, spanning at least this long (a proxy misroute or
+# a server restore can 401 transiently).
+_AUTH_STRIKES_REQUIRED = 3
+_AUTH_MIN_SPAN = 120.0
+
 _bridges: dict = {}
+_auth_strikes = 0
+_auth_first_at = 0.0
 _revocation_logged = False
 
 
@@ -175,25 +183,52 @@ def _run_job(cmd: dict) -> None:
 
 
 def _ensure_server_key() -> None:
-  """Re-assert the server's SSH login key (idempotent; survives reboots / UI edits)."""
+  """Re-assert the server's SSH login key (idempotent; survives reboots / UI
+  edits). Never re-adds it while the device is revoked — a re-link reinstalls it."""
+  if config.is_revoked():
+    return
   key = config.get("server_ssh_key")
   if key:
     client.install_server_key(key)
 
 
-def _handle_revoked(reason: str) -> None:
-  """The server revoked this device's key: drop the token, keep host/port, and
-  log once until the device is re-linked."""
+def _reset_auth_strikes() -> None:
+  global _auth_strikes, _auth_first_at
+  _auth_strikes = 0
+  _auth_first_at = 0.0
+
+
+def _confirm_revoked(reason: str) -> None:
+  """A confirmed revocation: drop the token (keep host/port), remove the server's
+  SSH login key, and log once until the device is re-linked."""
   global _revocation_logged
+  server_key = config.get("server_ssh_key")
   config.mark_revoked(reason)
+  if server_key:
+    client.remove_server_key(server_key)
+  config.set_values(server_ssh_key="")
   if not _revocation_logged:
     log.warning(f"server revoked this device's link; re-link to continue: {reason}")
     _revocation_logged = True
 
 
-def _reset_revocation_log() -> None:
-  global _revocation_logged
-  _revocation_logged = False
+def _handle_auth_error(code: str, reason: str) -> None:
+  """A 401. Only a run of our own 'unauthenticated' responses — at least
+  _AUTH_STRIKES_REQUIRED of them spanning >= _AUTH_MIN_SPAN — confirms
+  revocation; a foreign 401 (e.g. a proxy's Basic auth) never does."""
+  global _auth_strikes, _auth_first_at
+  if code != "unauthenticated":
+    config.set_error(f"server rejected the request (401): {reason}")
+    return
+  now = time.monotonic()
+  if _auth_strikes == 0:
+    _auth_first_at = now
+  _auth_strikes += 1
+  if _auth_strikes >= _AUTH_STRIKES_REQUIRED and now - _auth_first_at >= _AUTH_MIN_SPAN:
+    _confirm_revoked(reason)
+  else:
+    config.set_error(
+      f"Server rejected this device's key ({_auth_strikes}/{_AUTH_STRIKES_REQUIRED}) — re-link if this persists")
 
 
 def _backoff_seconds() -> int:
@@ -217,12 +252,13 @@ def _cycle(last_heartbeat: float) -> float:
   if time.monotonic() - last_heartbeat >= interval:
     try:
       client.heartbeat(host, port, token, pin, gather_stats())
+      _reset_auth_strikes()
       if config.get("last_error"):
         config.set_error("")
-      _reset_revocation_log()
-    except client.RevokedError as e:
-      _handle_revoked(str(e))
-      return last_heartbeat
+    except client.AuthError as e:
+      _handle_auth_error(e.code, str(e))
+      if config.is_revoked():
+        return last_heartbeat
     except client.PinError as e:
       config.set_error(f"cert pin mismatch: {e}")
     except Exception as e:
@@ -233,8 +269,11 @@ def _cycle(last_heartbeat: float) -> float:
   # instead of waiting for the next heartbeat cycle.
   try:
     _handle_command(client.poll(host, port, token, pin))
-  except client.RevokedError as e:
-    _handle_revoked(str(e))
+    _reset_auth_strikes()
+    if config.get("last_error"):
+      config.set_error("")
+  except client.AuthError as e:
+    _handle_auth_error(e.code, str(e))
   except client.PinError as e:
     config.set_error(f"cert pin mismatch: {e}")
     time.sleep(_ERROR_SLEEP)

@@ -29,8 +29,17 @@ class LinkError(Exception):
   """Server rejected the request (non-200)."""
 
 
-class RevokedError(Exception):
-  """The server revoked this device's key (HTTP 401); re-link to continue."""
+class AuthError(Exception):
+  """The server rejected our credentials (HTTP 401).
+
+  `code` is the server's error code when it sent our JSON envelope (e.g.
+  "unauthenticated"); it is "" for a foreign 401 (e.g. a proxy's Basic auth),
+  which must NOT be treated as a revocation.
+  """
+
+  def __init__(self, message: str, code: str = "") -> None:
+    super().__init__(message)
+    self.code = code
 
 
 def _fingerprint(der: bytes) -> str:
@@ -39,9 +48,27 @@ def _fingerprint(der: bytes) -> str:
 
 def _err(data: bytes) -> str:
   try:
-    return json.loads(data).get("error", data.decode(errors="replace"))
+    err = json.loads(data).get("error")
+    if isinstance(err, dict):
+      return str(err.get("message") or err.get("code") or err)
+    if err is not None:
+      return str(err)
+    return data.decode(errors="replace")
   except Exception:
     return data.decode(errors="replace")
+
+
+def _error_code(data: bytes) -> str:
+  """The server's error code from our JSON envelope ("" if it isn't ours)."""
+  try:
+    err = json.loads(data).get("error")
+    if isinstance(err, dict):
+      return str(err.get("code") or "")
+    if isinstance(err, str):
+      return err
+  except Exception:
+    pass
+  return ""
 
 
 def normalize_pairing_code(text: str) -> str:
@@ -73,25 +100,32 @@ def _request(host: str, port: int, method: str, path: str, headers: dict | None 
 
 # ---- tunnel key (device -> server, used for ssh -R) ----
 
-def _generate_tunnel_key() -> str:
+def _generate_tunnel_key(path: str) -> str:
   subprocess.run(
-    ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", config.TUNNEL_KEY_PATH],
+    ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", path],
     check=True, capture_output=True,
   )
-  os.chmod(config.TUNNEL_KEY_PATH, 0o600)
-  with open(config.TUNNEL_PUB_PATH) as f:
+  os.chmod(path, 0o600)
+  with open(path + ".pub") as f:
     return f.read().strip()
 
 
 def rotate_tunnel_key() -> str:
   """Generate a fresh key pair, discarding any existing one. Called on every
-  (re)link so a device never reuses a key the server has already seen."""
-  for path in (config.TUNNEL_KEY_PATH, config.TUNNEL_PUB_PATH):
+  (re)link so a device never reuses a key the server has already seen.
+
+  The new pair is generated to temp paths and atomically renamed into place, so
+  a failed ssh-keygen never leaves the device without a usable key."""
+  tmp = config.TUNNEL_KEY_PATH + ".new"
+  for path in (tmp, tmp + ".pub"):
     try:
       os.remove(path)
     except FileNotFoundError:
       pass
-  return _generate_tunnel_key()
+  pub = _generate_tunnel_key(tmp)
+  os.replace(tmp, config.TUNNEL_KEY_PATH)
+  os.replace(tmp + ".pub", config.TUNNEL_PUB_PATH)
+  return pub
 
 
 def _authorized_keys_paths() -> list[str]:
@@ -175,7 +209,7 @@ def heartbeat(host: str, port: int, token: str, pin: str, stats: dict) -> dict:
     json.dumps({"version": stats.get("version", ""), "stats": stats}), pin=pin, timeout=15.0,
   )
   if status == 401:
-    raise RevokedError(_err(data))
+    raise AuthError(_err(data), _error_code(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)
@@ -187,7 +221,7 @@ def poll(host: str, port: int, token: str, pin: str, timeout: float = 40.0) -> d
     {"authorization": f"Bearer {token}"}, None, pin=pin, timeout=timeout,
   )
   if status == 401:
-    raise RevokedError(_err(data))
+    raise AuthError(_err(data), _error_code(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)
