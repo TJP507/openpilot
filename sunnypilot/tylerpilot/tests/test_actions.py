@@ -130,6 +130,24 @@ def test_backup_returns_tarball():
   assert len(base64.b64decode(artifact["data"])) > 0
 
 
+def test_tar_dereferences_symlinks(tmp_path):
+  import io
+  import tarfile
+
+  real = tmp_path / "real"
+  real.mkdir()
+  (real / "CarParams").write_text("value")
+  linkdir = tmp_path / "linkdir"
+  linkdir.mkdir()
+  os.symlink(real, linkdir / "d")
+
+  data = actions._tar([str(linkdir / "d")])
+  with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+    members = t.getmembers()
+    assert not any(m.issym() for m in members), "symlink archived instead of its contents"
+    assert any(m.name.endswith("d/CarParams") for m in members)
+
+
 def test_diagnostics_returns_tarball(monkeypatch):
   monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, "output"))
   ok, msg, artifact = actions.diagnostics({})

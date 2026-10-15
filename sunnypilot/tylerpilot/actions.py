@@ -162,7 +162,9 @@ def trips_action(payload: dict):
 # --------------------------------------------------------------------------
 def _tar(paths: list[str], blobs: dict[str, bytes] | None = None) -> bytes:
   buf = io.BytesIO()
-  with tarfile.open(fileobj=buf, mode="w:gz") as t:
+  # dereference=True: /data/params/d is a symlink to the real params store, so
+  # without this the archive holds the link and no param files.
+  with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as t:
     for p in paths:
       if os.path.exists(p):
         try:
