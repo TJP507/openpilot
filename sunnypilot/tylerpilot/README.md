@@ -24,9 +24,9 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
    `XXXX-XXXX-XXXX` (valid 10 min).
 2. On the device: **Settings → Developer → TylerPilot Cloud → Link**, type the
    code (dashes and spaces are optional).
-3. The device generates a fresh tunnel key pair, registers over the pinned cert,
-   installs the server's login key into `/home/comma/.ssh/authorized_keys`, and
-   starts heartbeating.
+3. The device registers over the pinned cert, sending its sshd host public keys
+   (`/etc/ssh/ssh_host_*.pub`) so the server can pin them, installs the server's
+   login key into `/home/comma/.ssh/authorized_keys`, and starts heartbeating.
 
 ## Re-linking & revocation
 
@@ -74,8 +74,11 @@ The device talks to the server over **one port** (`DEFAULT_PORT`): the device AP
 the web UI, the server queues an `ssh_request` with a session id; the agent's
 next poll opens a **WebSocket** to `wss://<server>:<port>/api/v1/device/ssh-bridge`
 on that same port and bridges it to this device's sshd (`localhost:22`). The
-server runs `ssh` against the bridged stream and pipes a browser terminal through
-it. No separate SSH port or reverse `ssh -R` is needed.
+server dials the bridged stream with a Go SSH client and pipes a browser terminal
+through it. No separate SSH port or reverse `ssh -R` is needed, and the device
+keeps no tunnel key pair of its own: the server authenticates with its login key
+and pins this device's sshd host key (sent at link time) to fail closed on a
+changed key.
 
 ## Remote actions
 

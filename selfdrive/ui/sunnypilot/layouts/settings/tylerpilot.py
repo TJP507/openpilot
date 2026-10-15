@@ -153,9 +153,8 @@ class TylerPilotPanel(NavWidget):
     from openpilot.sunnypilot.tylerpilot import client
     host, port = tp.get("host"), int(tp.get("port"))
     try:
-      pubkey = client.rotate_tunnel_key()
       result = client.register(host, port, code, _device_name(), _device_uid(),
-                               get_version(), _dongle_id(), pubkey)
+                               get_version(), _dongle_id(), client.read_ssh_host_keys())
       srv_key = result.get("ssh_pubkey", "")
       client.install_server_key(srv_key)
       tp.set_link(result["device_id"], result["token"], result["fingerprint"],
