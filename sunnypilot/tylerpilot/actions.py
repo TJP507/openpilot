@@ -203,6 +203,16 @@ def diagnostics(_payload: dict):
   except OSError:
     pass
 
+  # Modem state and the captured pppd session log (the dial failure reason).
+  for path, name in (("/dev/shm/modem", "diag/modem.json"),
+                     ("/data/log/modem_pppd.log", "diag/modem_pppd.log"),
+                     ("/data/community/modem_pppd.log", "diag/modem_pppd.log")):
+    try:
+      with open(path, "rb") as f:
+        blobs[name] = log.redact_bytes(f.read()[-100_000:])
+    except OSError:
+      pass
+
   data = _tar([], blobs)
   return True, f"diagnostic bundle ({len(data)} bytes)", {"kind": "diagnostics", "data": base64.b64encode(data).decode()}
 
