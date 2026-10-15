@@ -33,7 +33,7 @@ from aiohttp import web
 
 import cereal.messaging as messaging
 
-from openpilot.sunnypilot.webdashcam import config, library, timeutil
+from openpilot.sunnypilot.webdashcam import auth, config, library, timeutil
 from openpilot.sunnypilot.webdashcam.zipstream import ZipStream
 
 HOST = "0.0.0.0"
@@ -41,6 +41,7 @@ CHUNK = 1 << 20  # 1 MiB
 COOKIE = "wd_session"
 SESSION_TTL = 60 * 60 * 24 * 30
 _SESSION_MESSAGE = b"webdashcam-session-v1"
+_LOGIN_LIMITER = auth.LoginLimiter()
 
 # The server binds every interface, but a request is only served when it arrives
 # on one of these. Cellular data interfaces (rmnet*, wwan*) are deliberately
@@ -316,6 +317,10 @@ async def auth_middleware(request: web.Request, handler):
     return web.Response(status=403, text="Not available on this network.")
   if not _is_offroad():
     return web.Response(status=403, text="Dash cam web server is only available while off-road (not while driving).")
+  # CSRF: a state-changing request from another origin is refused.
+  if request.method not in ("GET", "HEAD", "OPTIONS"):
+    if not auth.same_origin(request.headers.get("Origin", ""), request.headers.get("Referer", ""), request.host):
+      return web.Response(status=403, text="Cross-origin request refused.")
   if request.path == "/favicon.ico":
     return web.Response(status=204)
   if request.path in ("/login", "/logout"):
@@ -343,13 +348,20 @@ async def handle_login_get(_request: web.Request) -> web.Response:
 
 
 async def handle_login_post(request: web.Request) -> web.Response:
+  key = request.remote or "?"
+  remaining = _LOGIN_LIMITER.locked(key)
+  if remaining > 0:
+    return web.Response(text=_login_html(f"Too many attempts. Try again in {int(remaining) + 1}s."),
+                        content_type="text/html", status=429)
   data = await request.post()
   password = str(data.get("password", ""))
   token = _session_token()
   if token is not None and secrets.compare_digest(password, config.get_password()):
+    _LOGIN_LIMITER.succeed(key)
     response = web.HTTPFound("/")
-    response.set_cookie(COOKIE, token, max_age=SESSION_TTL, httponly=True, secure=True, samesite="Lax")
+    response.set_cookie(COOKIE, token, max_age=SESSION_TTL, httponly=True, secure=True, samesite="Strict")
     raise response
+  _LOGIN_LIMITER.fail(key)
   return web.Response(text=_login_html("Incorrect password."), content_type="text/html", status=401)
 
 

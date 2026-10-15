@@ -292,6 +292,21 @@ def test_cleanup_stale_restart_flag(tmp_path, monkeypatch):
   assert actions.cleanup_stale_restart_flag() is False
 
 
+def test_cleanup_legacy_tunnel_key(tmp_path, monkeypatch):
+  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
+  (tmp_path / "tylerpilot_tunnel").write_text("PRIVATE")
+  (tmp_path / "tylerpilot_tunnel.pub").write_text("ssh-ed25519 PUB")
+  (tmp_path / "tylerpilot_known_hosts").write_text("host key")
+  (tmp_path / "keep.json").write_text("{}")
+  assert actions.cleanup_legacy_tunnel_key() == 3
+  assert not (tmp_path / "tylerpilot_tunnel").exists()
+  assert not (tmp_path / "tylerpilot_tunnel.pub").exists()
+  assert not (tmp_path / "tylerpilot_known_hosts").exists()
+  assert (tmp_path / "keep.json").exists()
+  # Idempotent: nothing left to remove.
+  assert actions.cleanup_legacy_tunnel_key() == 0
+
+
 def test_handlers_registry():
   for name in ("reboot", "poweroff", "update", "location", "trips", "diagnostics", "backup", "restore"):
     assert name in actions.HANDLERS

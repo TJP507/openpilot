@@ -2,9 +2,9 @@
 TylerPilot Cloud background agent.
 
 Keeps a lightweight link to the central server while the device is linked:
-periodic stats heartbeats and a long-poll for commands (currently: open a
-reverse SSH tunnel on request). Uses a stdlib-only HTTP client and keeps
-traffic minimal, especially on LTE.
+periodic stats heartbeats and a long-poll for commands (run a remote action, or
+open an SSH-over-WebSocket bridge to this device's sshd on request). Uses a
+stdlib-only HTTP client and keeps traffic minimal, especially on LTE.
 """
 from __future__ import annotations
 
@@ -364,6 +364,7 @@ def main() -> None:
   log.info("agent starting")
   actions.cleanup_legacy_prerestore()
   actions.cleanup_stale_restart_flag()
+  actions.cleanup_legacy_tunnel_key()
   last_heartbeat = 0.0
   while True:
     try:

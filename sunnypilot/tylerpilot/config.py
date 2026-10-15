@@ -20,9 +20,6 @@ from openpilot.system.hardware.hw import Paths
 
 STATE_DIR = Paths.comma_home() if PC else "/data/community"
 STATE_PATH = os.path.join(STATE_DIR, "tylerpilot.json")
-TUNNEL_KEY_PATH = os.path.join(STATE_DIR, "tylerpilot_tunnel")
-TUNNEL_PUB_PATH = TUNNEL_KEY_PATH + ".pub"
-KNOWN_HOSTS_PATH = os.path.join(STATE_DIR, "tylerpilot_known_hosts")
 
 # The comma's SSH login user (where the server's login key is installed).
 DEVICE_SSH_USER = "comma"

@@ -284,6 +284,24 @@ def cleanup_stale_restart_flag() -> bool:
     return False
 
 
+def cleanup_legacy_tunnel_key() -> int:
+  """Delete the legacy reverse-SSH device tunnel key files.
+
+  The device no longer needs its own tunnel key pair: SSH is bridged over the
+  WebSocket and authorized by the server's login key. Any files left by an older
+  firmware (the tunnel key pair, and the unused known-hosts file) are removed."""
+  removed = 0
+  for name in ("tylerpilot_tunnel", "tylerpilot_tunnel.pub", "tylerpilot_known_hosts"):
+    try:
+      os.remove(os.path.join(config.STATE_DIR, name))
+      removed += 1
+    except OSError:
+      pass
+  if removed:
+    log.info(f"removed {removed} legacy tunnel key file(s)")
+  return removed
+
+
 HANDLERS = {
   "reboot": reboot,
   "poweroff": poweroff,

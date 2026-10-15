@@ -1,7 +1,7 @@
 """
 Device <-> server client.
 
-Deliberately stdlib-only (http.client + ssl + hashlib + subprocess) so the
+Deliberately stdlib-only (http.client + ssl + hashlib) so the
 agent stays tiny and adds no dependencies. The server's self-signed TLS
 certificate is pinned: the fingerprint is captured on first registration
 (trust-on-first-use, authorized by the pairing code) and verified on every
@@ -16,7 +16,6 @@ import json
 import os
 import socket
 import ssl
-import subprocess
 
 from . import config
 
@@ -98,34 +97,33 @@ def _request(host: str, port: int, method: str, path: str, headers: dict | None 
     conn.close()
 
 
-# ---- tunnel key (device -> server, used for ssh -R) ----
+# ---- device sshd host keys (pinned by the server) ----
 
-def _generate_tunnel_key(path: str) -> str:
-  subprocess.run(
-    ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", path],
-    check=True, capture_output=True,
-  )
-  os.chmod(path, 0o600)
-  with open(path + ".pub") as f:
-    return f.read().strip()
+# The device's sshd host public keys, read at (re)link so the server can pin
+# them and fail closed if a later dial presents a different key. ed25519 first,
+# then the other host key types sshd may generate.
+SSH_HOST_KEY_PATHS = (
+  "/etc/ssh/ssh_host_ed25519_key.pub",
+  "/etc/ssh/ssh_host_ecdsa_key.pub",
+  "/etc/ssh/ssh_host_rsa_key.pub",
+)
 
 
-def rotate_tunnel_key() -> str:
-  """Generate a fresh key pair, discarding any existing one. Called on every
-  (re)link so a device never reuses a key the server has already seen.
+def read_ssh_host_keys() -> list[str]:
+  """Read the device's sshd host public keys (ed25519 first, then fallbacks).
 
-  The new pair is generated to temp paths and atomically renamed into place, so
-  a failed ssh-keygen never leaves the device without a usable key."""
-  tmp = config.TUNNEL_KEY_PATH + ".new"
-  for path in (tmp, tmp + ".pub"):
+  Returns [] when none are readable; the server then pins the key by
+  trust-on-first-use on the first successful dial."""
+  keys: list[str] = []
+  for path in SSH_HOST_KEY_PATHS:
     try:
-      os.remove(path)
-    except FileNotFoundError:
-      pass
-  pub = _generate_tunnel_key(tmp)
-  os.replace(tmp, config.TUNNEL_KEY_PATH)
-  os.replace(tmp + ".pub", config.TUNNEL_PUB_PATH)
-  return pub
+      with open(path) as f:
+        line = f.read().strip()
+    except OSError:
+      continue
+    if line.startswith("ssh-"):
+      keys.append(line)
+  return keys
 
 
 def _authorized_keys_paths() -> list[str]:
@@ -185,10 +183,10 @@ def remove_server_key(pubkey: str) -> None:
 # ---- server API ----
 
 def register(host: str, port: int, code: str, name: str, uid: str, version: str,
-             dongle_id: str, tunnel_pubkey: str) -> dict:
+             dongle_id: str, ssh_host_keys: list[str] | None = None) -> dict:
   payload = {
     "code": code, "name": name, "uid": uid, "version": version,
-    "dongle_id": dongle_id, "tunnel_pubkey": tunnel_pubkey,
+    "dongle_id": dongle_id, "ssh_host_keys": ssh_host_keys or [],
     "ssh_user": config.DEVICE_SSH_USER,
   }
   status, data, fp = _request(

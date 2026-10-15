@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
+import json
 
 import pytest
 
-from openpilot.sunnypilot.tylerpilot import client, config
+from openpilot.sunnypilot.tylerpilot import client
 
 
 def test_normalize_pairing_code_accepts_dashes_and_spaces():
@@ -48,49 +47,36 @@ def test_heartbeat_non_200_raises_link_error(monkeypatch):
     client.heartbeat("h", 1, "tok", "fp", {})
 
 
-@pytest.fixture
-def key_paths(tmp_path, monkeypatch):
-  key = tmp_path / "tylerpilot_tunnel"
-  pub = tmp_path / "tylerpilot_tunnel.pub"
-  monkeypatch.setattr(config, "TUNNEL_KEY_PATH", str(key))
-  monkeypatch.setattr(config, "TUNNEL_PUB_PATH", str(pub))
-  return key, pub
+def test_read_ssh_host_keys_reads_ed25519_first(tmp_path, monkeypatch):
+  ed = tmp_path / "ssh_host_ed25519_key.pub"
+  rsa = tmp_path / "ssh_host_rsa_key.pub"
+  ed.write_text("ssh-ed25519 AAAAed25519 dev\n")
+  rsa.write_text("ssh-rsa AAAArsa dev\n")
+  monkeypatch.setattr(client, "SSH_HOST_KEY_PATHS", (str(ed), str(rsa)))
+  assert client.read_ssh_host_keys() == ["ssh-ed25519 AAAAed25519 dev", "ssh-rsa AAAArsa dev"]
 
 
-def test_rotate_tunnel_key_replaces_existing(key_paths, monkeypatch):
-  key, pub = key_paths
-  key.write_text("OLD-PRIVATE")
-  pub.write_text("ssh-ed25519 OLDKEY")
-  calls: list = []
-
-  def fake_run(cmd, **kwargs):
-    calls.append(cmd)
-    tmp = cmd[-1]
-    Path(tmp).write_text("NEW-PRIVATE")
-    Path(tmp + ".pub").write_text("ssh-ed25519 NEWKEY")
-
-  monkeypatch.setattr(client.subprocess, "run", fake_run)
-
-  assert client.rotate_tunnel_key() == "ssh-ed25519 NEWKEY"
-  assert key.read_text() == "NEW-PRIVATE"
-  assert pub.read_text() == "ssh-ed25519 NEWKEY"
-  assert calls and calls[0][0] == "ssh-keygen"
-  # The temp files are renamed away, not left behind.
-  assert not Path(str(key) + ".new").exists()
+def test_read_ssh_host_keys_skips_missing_and_junk(tmp_path, monkeypatch):
+  good = tmp_path / "good.pub"
+  junk = tmp_path / "junk.pub"
+  good.write_text("ssh-ed25519 AAAAok dev")
+  junk.write_text("not a key")
+  monkeypatch.setattr(client, "SSH_HOST_KEY_PATHS", (str(tmp_path / "missing.pub"), str(junk), str(good)))
+  assert client.read_ssh_host_keys() == ["ssh-ed25519 AAAAok dev"]
 
 
-def test_rotate_tunnel_key_failure_keeps_old_key(key_paths, monkeypatch):
-  key, pub = key_paths
-  key.write_text("OLD-PRIVATE")
-  pub.write_text("ssh-ed25519 OLDKEY")
+def test_register_sends_ssh_host_keys(monkeypatch):
+  captured: dict = {}
 
-  def boom(cmd, **kwargs):
-    raise subprocess.CalledProcessError(1, cmd)
+  def fake_request(host, port, method, path, headers=None, body=None, pin=None, timeout=15.0):
+    captured["path"] = path
+    captured["body"] = json.loads(body)
+    return 200, b'{"device_id":"dev1","token":"tok"}', "fp"
 
-  monkeypatch.setattr(client.subprocess, "run", boom)
-
-  with pytest.raises(subprocess.CalledProcessError):
-    client.rotate_tunnel_key()
-  # The old key pair is untouched, so the device is never left keyless.
-  assert key.read_text() == "OLD-PRIVATE"
-  assert pub.read_text() == "ssh-ed25519 OLDKEY"
+  monkeypatch.setattr(client, "_request", fake_request)
+  out = client.register("h", 7448, "123456789012", "Car", "uid", "v1", "dongle",
+                        ["ssh-ed25519 AAAAone"])
+  assert captured["path"] == "/api/v1/device/register"
+  assert captured["body"]["ssh_host_keys"] == ["ssh-ed25519 AAAAone"]
+  assert "tunnel_pubkey" not in captured["body"]
+  assert out["device_id"] == "dev1"
