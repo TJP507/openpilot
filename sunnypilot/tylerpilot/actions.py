@@ -183,6 +183,9 @@ D_INCLUDES = ["/data/params/d", "/data/community"]
 
 
 def diagnostics(_payload: dict):
+  """Support bundle: system state + logs. Deliberately does NOT include the
+  settings that `backup` captures (params + community) — those are restorable
+  and belong to the backup, not to a diagnostic snapshot."""
   blobs: dict[str, bytes] = {}
   cmds = {
     "diag/dmesg.txt": ["dmesg"],
@@ -210,7 +213,14 @@ def diagnostics(_payload: dict):
   except OSError:
     pass
 
-  data = _tar(D_INCLUDES, blobs)  # params+community included per "no redaction"
+  # TylerPilot agent log tail
+  try:
+    with open("/data/community/tylerpilot.log", "rb") as f:
+      blobs["diag/tylerpilot.log"] = f.read()[-200_000:]
+  except OSError:
+    pass
+
+  data = _tar([], blobs)
   return True, f"diagnostic bundle ({len(data)} bytes)", {"kind": "diagnostics", "data": base64.b64encode(data).decode()}
 
 
