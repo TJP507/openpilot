@@ -35,7 +35,7 @@ from aiohttp import web
 
 import cereal.messaging as messaging
 
-from openpilot.sunnypilot.webdashcam import config, library
+from openpilot.sunnypilot.webdashcam import config, library, timeutil
 
 HOST = "0.0.0.0"
 CHUNK = 1 << 20  # 1 MiB
@@ -167,6 +167,7 @@ main{padding:12px;max-width:900px;margin:0 auto;padding-bottom:96px}
 const CAMLABEL={front:"Front",wide:"Wide",driver:"Driver"};
 const state={dates:[],date:null,clips:[],cam:"all",sel:new Set()};
 const $=(s)=>document.querySelector(s);
+const dlabel=(d)=>d==="unknown"?"Unknown date":d;
 const fmt=(b)=>b>=1073741824?(b/1073741824).toFixed(2)+" GB":b>=1048576?(b/1048576).toFixed(1)+" MB":Math.round(b/1024)+" KB";
 async function api(path){const r=await fetch(path);if(r.status===401){location.href="/login";throw new Error("auth");}if(!r.ok)throw new Error(r.status);return r.json();}
 
@@ -174,7 +175,7 @@ async function loadDates(){
   state.date=null;state.clips=[];state.sel.clear();state.cam="all";
   const d=await api("/api/dates");
   state.dates=d.dates;
-  $("#sub").textContent=d.dates.length+" day(s) with recordings";
+  $("#sub").textContent=d.dates.length+" day(s) with recordings \\u00b7 times in UTC";
   $("#cams").classList.add("hidden");
   renderDates();
 }
@@ -186,9 +187,10 @@ function renderDates(){
   if(!state.dates.length){el.innerHTML='<div class="empty">No recordings found</div>';return;}
   for(const d of state.dates){
     const row=document.createElement("div");row.className="row";
-    row.innerHTML=`<div class="grow open"><div class="title">${d.date}</div>
+    const title=d.date==="unknown"?' title="Recorded before the device clock was set"':'';
+    row.innerHTML=`<div class="grow open"${title}><div class="title">${dlabel(d.date)}</div>
       <div class="meta">${d.count} clip(s)</div></div>
-      <a class="btn" href="/zip?date=${d.date}">Download day</a>`;
+      <a class="btn" href="/zip?date=${encodeURIComponent(d.date)}">Download day</a>`;
     row.querySelector(".open").onclick=()=>openDate(d.date);
     el.appendChild(row);
   }
@@ -198,7 +200,7 @@ async function openDate(date){
   state.date=date;state.sel.clear();
   const d=await api("/api/clips?date="+encodeURIComponent(date));
   state.clips=d.clips;
-  $("#sub").textContent=date+" \\u2022 "+d.clips.length+" clip(s)";
+  $("#sub").textContent=dlabel(date)+" \\u2022 "+d.clips.length+" clip(s) \\u00b7 times in UTC";
   renderCams();
   renderClips();
 }
@@ -224,7 +226,7 @@ function renderClips(){
     const total=c.cameras.filter(x=>cams.includes(x.slug)).reduce((a,x)=>a+x.size,0);
     const on=state.sel.has(c.seg);
     row.innerHTML=`<div class="check ${on?"on":""}"></div>
-      <div class="grow"><div class="title">${c.time}</div>
+      <div class="grow"><div class="title">${c.time} UTC</div>
       <div class="meta">segment ${c.seg.split("--").pop()} \\u2022 ${fmt(total)}</div></div>
       <div class="acts"></div>`;
     const acts=row.querySelector(".acts");
@@ -357,7 +359,7 @@ async def handle_logout(_request: web.Request) -> web.Response:
 
 async def handle_dates(_request: web.Request) -> web.Response:
   counts = library.list_date_counts()
-  dates = [{"date": d, "count": counts[d]} for d in sorted(counts, reverse=True)]
+  dates = [{"date": d, "count": counts[d]} for d in library.sorted_date_groups(counts)]
   return web.json_response({"dates": dates})
 
 
@@ -418,12 +420,14 @@ async def handle_zip(request: web.Request) -> web.StreamResponse:
     for cam in cams:
       path = library.camera_path(name, cam)
       if path is not None:
-        entries.append((f"{name}_{cam}.mp4", mtime, path))
+        folder = library.date_of(mtime)
+        stamp = timeutil.time_text(mtime).replace(":", "-")
+        entries.append((f"{folder}/{stamp}_{cam}.mp4", mtime, path))
 
   if not entries:
     raise web.HTTPNotFound(text="nothing to download")
 
-  label = date or time.strftime("%Y-%m-%d")
+  label = date or timeutil.today_text()
   response = web.StreamResponse(headers={
     "Content-Type": "application/zip",
     "Content-Disposition": f'attachment; filename="dashcam_{label}.zip"',
@@ -464,13 +468,6 @@ async def _mp4_chunks(path: str):
     await proc.wait()
 
 
-def _dos_datetime(mtime: float) -> tuple[int, int]:
-  t = time.localtime(mtime)
-  dos_time = (t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec // 2)
-  dos_date = (max(t.tm_year - 1980, 0) << 9) | (t.tm_mon << 5) | t.tm_mday
-  return dos_time, dos_date
-
-
 class _ZipStream:
   """Minimal streaming ZIP writer (store method, data descriptors).
 
@@ -491,7 +488,7 @@ class _ZipStream:
 
   async def add(self, name: str, mtime: float, chunks) -> None:
     raw_name = name.encode("utf-8")
-    dos_time, dos_date = _dos_datetime(mtime)
+    dos_time, dos_date = timeutil.dos_datetime(mtime)
     offset = self._offset
     header = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0x0008, 0, dos_time, dos_date,
                          0, 0, 0, len(raw_name), 0)
