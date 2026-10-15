@@ -8,18 +8,27 @@ traffic minimal, especially on LTE.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 import psutil
 
+from openpilot.common.git import get_commit, get_short_branch
+from openpilot.common.params import Params
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.version import get_version
 
 from openpilot.sunnypilot.tylerpilot import config, client, log, actions
 
 # Heartbeat cadence (seconds) by link type.
-_INTERVAL = {"wifi": 15, "lan": 15, "lte": 15, "none": 15}
+_INTERVAL = {"wifi": 15, "ethernet": 15, "cell": 15, "none": 15}
+
+# Recordings (dash cam) directory and how long its size may be cached. Summing
+# the tree is expensive, so it is refreshed at most every 10 minutes.
+_RECORDINGS_DIR = "/data/media/0/realdata"
+_RECORDINGS_TTL = 600.0
+_recordings_cache: tuple[float, int] = (0.0, -1)  # (monotonic_at, bytes); -1 = unknown
 
 # Idle / backoff sleeps (seconds).
 _IDLE_SLEEP = 5
@@ -59,11 +68,11 @@ def _classify(iface: str) -> str | None:
   if not iface:
     return None
   if any(p in iface for p in ("rmnet", "wwan", "ppp")):
-    return "lte"
+    return "cell"
   if any(p in iface for p in ("wlan", "wlp")):
     return "wifi"
   if any(p in iface for p in ("eth", "enp", "usb", "tether")):
-    return "lan"
+    return "ethernet"
   return None
 
 
@@ -90,27 +99,95 @@ def _cpu_temp():
   return None
 
 
-def gather_stats() -> dict:
-  stats: dict = {"net": _net_type()}
+def _onroad_state() -> bool | None:
+  """Onroad flag, or None when it cannot be read (stats omit unknown values)."""
   try:
-    stats["version"] = get_version()
+    return bool(Params().get_bool("IsOnroad"))
+  except Exception as e:
+    log.warning(f"could not read IsOnroad for stats: {e}")
+    return None
+
+
+def _git(fn) -> str:
+  try:
+    return fn() or ""
   except Exception:
-    stats["version"] = ""
+    return ""
+
+
+def _dir_size(path: str) -> int:
+  total = 0
   try:
-    stats["uptime"] = int(time.time() - psutil.boot_time())  # noqa: TID251 — wall-clock uptime
+    with os.scandir(path) as it:
+      for entry in it:
+        try:
+          if entry.is_dir(follow_symlinks=False):
+            total += _dir_size(entry.path)
+          elif entry.is_file(follow_symlinks=False):
+            total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+          pass
+  except OSError:
+    pass
+  return total
+
+
+def _recordings_bytes() -> int | None:
+  """Size of the dash cam recordings directory, cached for up to 10 minutes."""
+  global _recordings_cache
+  at, cached = _recordings_cache
+  now = time.monotonic()
+  if cached >= 0 and now - at < _RECORDINGS_TTL:
+    return cached
+  if not os.path.isdir(_RECORDINGS_DIR):
+    _recordings_cache = (now, -1)
+    return None
+  size = _dir_size(_RECORDINGS_DIR)
+  _recordings_cache = (now, size)
+  return size
+
+
+def gather_stats() -> dict:
+  """A cheap device-health snapshot. Unavailable values are omitted, never faked."""
+  stats: dict = {"net_type": _net_type()}
+  version = _git(get_version)
+  if version:
+    stats["version"] = version
+  branch = _git(get_short_branch)
+  if branch:
+    stats["branch"] = branch
+  commit = _git(get_commit)
+  if commit:
+    stats["commit"] = commit[:7]
+  try:
+    boot = psutil.boot_time()
+    stats["uptime_s"] = int(time.time() - boot)  # noqa: TID251 — wall-clock uptime
+    stats["started_at"] = int(boot)
   except Exception:
     pass
   temp = _cpu_temp()
-  if temp:
-    stats["cpu_temp"] = temp
+  if temp is not None:
+    stats["cpu_temp_c"] = temp
   try:
-    stats["free_storage"] = psutil.disk_usage("/" if PC else "/data").free
+    stats["cpu_pct"] = round(psutil.cpu_percent(interval=None), 1)
   except Exception:
     pass
   try:
-    stats["device_type"] = HARDWARE.get_device_type()
+    stats["mem_pct"] = round(psutil.virtual_memory().percent, 1)
   except Exception:
     pass
+  try:
+    usage = psutil.disk_usage("/" if PC else "/data")
+    stats["storage_free_bytes"] = usage.free
+    stats["storage_total_bytes"] = usage.total
+  except Exception:
+    pass
+  recordings = _recordings_bytes()
+  if recordings is not None:
+    stats["recordings_bytes"] = recordings
+  onroad = _onroad_state()
+  if onroad is not None:
+    stats["onroad"] = onroad
   return stats
 
 
@@ -286,6 +363,7 @@ def _cycle(last_heartbeat: float) -> float:
 def main() -> None:
   log.info("agent starting")
   actions.cleanup_legacy_prerestore()
+  actions.cleanup_stale_restart_flag()
   last_heartbeat = 0.0
   while True:
     try:
