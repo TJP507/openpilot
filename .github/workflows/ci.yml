@@ -95,6 +95,24 @@ jobs:
           fi
           pytest -o addopts="" --confcutdir=sunnypilot sunnypilot/tylerpilot/tests
 
+  modem:
+    name: modem
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r .github/ci-requirements.txt
+      - name: Run modem daemon unit tests
+        # Build-free: the state machine runs against a fake PPPSession/AT layer.
+        run: pytest -o addopts="" --confcutdir=system system/hardware/tici/tests/test_modem.py system/hardware/tici/tests/test_modem_format.py
+
   build:
     name: build
     # The build system (root SConstruct/SConscript + ONNX models) is restored

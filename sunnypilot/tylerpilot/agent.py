@@ -8,6 +8,7 @@ stdlib-only HTTP client and keeps traffic minimal, especially on LTE.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -115,6 +116,36 @@ def _git(fn) -> str:
     return ""
 
 
+# Modem daemon state (written by system.hardware.tici.modem). Small, useful
+# fields only, so the server can show a compact cellular status.
+_MODEM_STATE_PATH = "/dev/shm/modem"
+
+
+def _cellular_stats() -> dict:
+  """A compact cellular summary from the modem state file ({} when unavailable)."""
+  try:
+    with open(_MODEM_STATE_PATH) as f:
+      m = json.load(f)
+  except (OSError, ValueError):
+    return {}
+  if not isinstance(m, dict):
+    return {}
+  out: dict = {}
+  state = m.get("state")
+  if isinstance(state, str) and state:
+    out["cell_state"] = state
+  operator = m.get("operator")
+  if isinstance(operator, str) and operator:
+    out["cell_operator"] = operator
+  signal = m.get("signal_quality")
+  if isinstance(signal, (int, float)) and not isinstance(signal, bool):
+    out["cell_signal"] = int(signal)
+  error = m.get("last_error")
+  if isinstance(error, str) and error:
+    out["cell_error"] = error
+  return out
+
+
 def _dir_size(path: str) -> int:
   total = 0
   try:
@@ -188,6 +219,7 @@ def gather_stats() -> dict:
   onroad = _onroad_state()
   if onroad is not None:
     stats["onroad"] = onroad
+  stats.update(_cellular_stats())
   return stats
 
 
