@@ -29,6 +29,10 @@ class LinkError(Exception):
   """Server rejected the request (non-200)."""
 
 
+class RevokedError(Exception):
+  """The server revoked this device's key (HTTP 401); re-link to continue."""
+
+
 def _fingerprint(der: bytes) -> str:
   return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
 
@@ -38,6 +42,13 @@ def _err(data: bytes) -> str:
     return json.loads(data).get("error", data.decode(errors="replace"))
   except Exception:
     return data.decode(errors="replace")
+
+
+def normalize_pairing_code(text: str) -> str:
+  """Strip everything but digits, so a code entered as XXXX-XXXX-XXXX or with
+  spaces is accepted. Returns "" when it is not a 12-digit code."""
+  digits = "".join(ch for ch in (text or "") if ch.isdigit())
+  return digits if len(digits) == 12 else ""
 
 
 def _request(host: str, port: int, method: str, path: str, headers: dict | None = None,
@@ -62,15 +73,25 @@ def _request(host: str, port: int, method: str, path: str, headers: dict | None 
 
 # ---- tunnel key (device -> server, used for ssh -R) ----
 
-def ensure_tunnel_key() -> str:
-  if not (os.path.exists(config.TUNNEL_KEY_PATH) and os.path.exists(config.TUNNEL_PUB_PATH)):
-    subprocess.run(
-      ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", config.TUNNEL_KEY_PATH],
-      check=True, capture_output=True,
-    )
-    os.chmod(config.TUNNEL_KEY_PATH, 0o600)
+def _generate_tunnel_key() -> str:
+  subprocess.run(
+    ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", config.TUNNEL_KEY_PATH],
+    check=True, capture_output=True,
+  )
+  os.chmod(config.TUNNEL_KEY_PATH, 0o600)
   with open(config.TUNNEL_PUB_PATH) as f:
     return f.read().strip()
+
+
+def rotate_tunnel_key() -> str:
+  """Generate a fresh key pair, discarding any existing one. Called on every
+  (re)link so a device never reuses a key the server has already seen."""
+  for path in (config.TUNNEL_KEY_PATH, config.TUNNEL_PUB_PATH):
+    try:
+      os.remove(path)
+    except FileNotFoundError:
+      pass
+  return _generate_tunnel_key()
 
 
 def _authorized_keys_paths() -> list[str]:
@@ -153,6 +174,8 @@ def heartbeat(host: str, port: int, token: str, pin: str, stats: dict) -> dict:
     {"content-type": "application/json", "authorization": f"Bearer {token}"},
     json.dumps({"version": stats.get("version", ""), "stats": stats}), pin=pin, timeout=15.0,
   )
+  if status == 401:
+    raise RevokedError(_err(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)
@@ -163,6 +186,8 @@ def poll(host: str, port: int, token: str, pin: str, timeout: float = 40.0) -> d
     host, port, "GET", "/api/v1/device/poll",
     {"authorization": f"Bearer {token}"}, None, pin=pin, timeout=timeout,
   )
+  if status == 401:
+    raise RevokedError(_err(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)

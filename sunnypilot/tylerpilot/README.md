@@ -20,10 +20,24 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
 
 ## Linking
 
-1. Server web UI → **Add device** → copy the 12-digit code (valid 10 min).
-2. On the device: **Settings → Developer → TylerPilot Cloud → Link**, type the code.
-3. The device registers over the pinned cert, installs the server's login key into
-   `/home/comma/.ssh/authorized_keys`, and starts heartbeating.
+1. Server web UI → **Link device** (or **Re-link**) → copy the code, shown as
+   `XXXX-XXXX-XXXX` (valid 10 min).
+2. On the device: **Settings → Developer → TylerPilot Cloud → Link**, type the
+   code (dashes and spaces are optional).
+3. The device generates a fresh tunnel key pair, registers over the pinned cert,
+   installs the server's login key into `/home/comma/.ssh/authorized_keys`, and
+   starts heartbeating.
+
+## Re-linking & revocation
+
+A **Re-link** from the web UI revokes the device's current key immediately: the
+old token is rejected (HTTP 401) and the device shows as *Awaiting re-link*
+until the new code is entered on the comma. When the agent's heartbeat or poll
+gets a **401**, it drops the token (keeping host/port), marks the link *revoked*,
+logs once, and backs off to a 60s idle — it resumes automatically as soon as a
+new code is entered. The Settings panel then reads **"Disconnected from
+TylerPilot Cloud — enter a new code to re-link"** and shows the Link button
+(Unlink is hidden).
 
 ## Server address
 

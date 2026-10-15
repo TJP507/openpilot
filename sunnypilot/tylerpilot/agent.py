@@ -21,7 +21,14 @@ from openpilot.sunnypilot.tylerpilot import config, client, log, actions
 # Heartbeat cadence (seconds) by link type.
 _INTERVAL = {"wifi": 15, "lan": 15, "lte": 15, "none": 15}
 
+# Idle / backoff sleeps (seconds).
+_IDLE_SLEEP = 5
+_REVOKED_BACKOFF = 60  # a revoked device only re-checks slowly for a new token
+_ERROR_SLEEP = 5
+_OUTER_ERROR_SLEEP = 10
+
 _bridges: dict = {}
+_revocation_logged = False
 
 
 def _active_iface() -> str:
@@ -174,6 +181,69 @@ def _ensure_server_key() -> None:
     client.install_server_key(key)
 
 
+def _handle_revoked(reason: str) -> None:
+  """The server revoked this device's key: drop the token, keep host/port, and
+  log once until the device is re-linked."""
+  global _revocation_logged
+  config.mark_revoked(reason)
+  if not _revocation_logged:
+    log.warning(f"server revoked this device's link; re-link to continue: {reason}")
+    _revocation_logged = True
+
+
+def _reset_revocation_log() -> None:
+  global _revocation_logged
+  _revocation_logged = False
+
+
+def _backoff_seconds() -> int:
+  """How long to idle: a revoked device waits longer (it only resumes when the
+  user links a new code, which sets a fresh token)."""
+  return _REVOKED_BACKOFF if config.is_revoked() else _IDLE_SLEEP
+
+
+def _cycle(last_heartbeat: float) -> float:
+  """One pass of the agent loop: heartbeat on cadence, then one poll. Returns
+  the (possibly updated) heartbeat time."""
+  _ensure_server_key()
+
+  host = config.get("host")
+  port = int(config.get("port"))
+  token = config.get("token")
+  pin = config.get("fingerprint")
+
+  # Heartbeat on a cadence that scales with the link type.
+  interval = _INTERVAL.get(_net_type(), 15)
+  if time.monotonic() - last_heartbeat >= interval:
+    try:
+      client.heartbeat(host, port, token, pin, gather_stats())
+      if config.get("last_error"):
+        config.set_error("")
+      _reset_revocation_log()
+    except client.RevokedError as e:
+      _handle_revoked(str(e))
+      return last_heartbeat
+    except client.PinError as e:
+      config.set_error(f"cert pin mismatch: {e}")
+    except Exception as e:
+      config.set_error(str(e))
+    last_heartbeat = time.monotonic()
+
+  # Poll continuously (long-poll holds ~25s) so commands arrive promptly
+  # instead of waiting for the next heartbeat cycle.
+  try:
+    _handle_command(client.poll(host, port, token, pin))
+  except client.RevokedError as e:
+    _handle_revoked(str(e))
+  except client.PinError as e:
+    config.set_error(f"cert pin mismatch: {e}")
+    time.sleep(_ERROR_SLEEP)
+  except Exception as e:
+    config.set_error(str(e))
+    time.sleep(_ERROR_SLEEP)
+  return last_heartbeat
+
+
 def main() -> None:
   log.info("agent starting")
   actions.cleanup_legacy_prerestore()
@@ -181,42 +251,12 @@ def main() -> None:
   while True:
     try:
       if not config.is_linked():
-        time.sleep(5)
+        time.sleep(_backoff_seconds())
         continue
-
-      _ensure_server_key()
-
-      host = config.get("host")
-      port = int(config.get("port"))
-      token = config.get("token")
-      pin = config.get("fingerprint")
-
-      # Heartbeat on a cadence that scales with the link type.
-      interval = _INTERVAL.get(_net_type(), 15)
-      if time.monotonic() - last_heartbeat >= interval:
-        try:
-          client.heartbeat(host, port, token, pin, gather_stats())
-          if config.get("last_error"):
-            config.set_error("")
-        except client.PinError as e:
-          config.set_error(f"cert pin mismatch: {e}")
-        except Exception as e:
-          config.set_error(str(e))
-        last_heartbeat = time.monotonic()
-
-      # Poll continuously (long-poll holds ~25s) so commands arrive promptly
-      # instead of waiting for the next heartbeat cycle.
-      try:
-        _handle_command(client.poll(host, port, token, pin))
-      except client.PinError as e:
-        config.set_error(f"cert pin mismatch: {e}")
-        time.sleep(5)
-      except Exception as e:
-        config.set_error(str(e))
-        time.sleep(5)
+      last_heartbeat = _cycle(last_heartbeat)
     except Exception as e:
       log.warning(f"agent loop error: {e}")
-      time.sleep(10)
+      time.sleep(_OUTER_ERROR_SLEEP)
 
 
 if __name__ == "__main__":
