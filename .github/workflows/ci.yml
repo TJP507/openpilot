@@ -70,7 +70,8 @@ jobs:
         run: |
           pytest -o addopts="" --confcutdir=sunnypilot -m "not slow and not tici" \
             sunnypilot/mapd/tests/test_mapd_version.py \
-            sunnypilot/selfdrive/selfdrived/tests/test_button_state_tracker.py
+            sunnypilot/selfdrive/selfdrived/tests/test_button_state_tracker.py \
+            sunnypilot/webdashcam/tests
 
   tylerpilot:
     name: tylerpilot

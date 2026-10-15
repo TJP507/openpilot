@@ -24,18 +24,17 @@ import os
 import secrets
 import socket
 import ssl
-import struct
 import subprocess
 import threading
 import time
-import zlib
 
 import psutil
 from aiohttp import web
 
 import cereal.messaging as messaging
 
-from openpilot.sunnypilot.webdashcam import config, library
+from openpilot.sunnypilot.webdashcam import config, library, timeutil
+from openpilot.sunnypilot.webdashcam.zipstream import ZipStream
 
 HOST = "0.0.0.0"
 CHUNK = 1 << 20  # 1 MiB
@@ -167,6 +166,7 @@ main{padding:12px;max-width:900px;margin:0 auto;padding-bottom:96px}
 const CAMLABEL={front:"Front",wide:"Wide",driver:"Driver"};
 const state={dates:[],date:null,clips:[],cam:"all",sel:new Set()};
 const $=(s)=>document.querySelector(s);
+const dlabel=(d)=>d==="unknown"?"Unknown date":d;
 const fmt=(b)=>b>=1073741824?(b/1073741824).toFixed(2)+" GB":b>=1048576?(b/1048576).toFixed(1)+" MB":Math.round(b/1024)+" KB";
 async function api(path){const r=await fetch(path);if(r.status===401){location.href="/login";throw new Error("auth");}if(!r.ok)throw new Error(r.status);return r.json();}
 
@@ -174,7 +174,7 @@ async function loadDates(){
   state.date=null;state.clips=[];state.sel.clear();state.cam="all";
   const d=await api("/api/dates");
   state.dates=d.dates;
-  $("#sub").textContent=d.dates.length+" day(s) with recordings";
+  $("#sub").textContent=d.dates.length+" day(s) with recordings \\u00b7 times in UTC";
   $("#cams").classList.add("hidden");
   renderDates();
 }
@@ -186,9 +186,10 @@ function renderDates(){
   if(!state.dates.length){el.innerHTML='<div class="empty">No recordings found</div>';return;}
   for(const d of state.dates){
     const row=document.createElement("div");row.className="row";
-    row.innerHTML=`<div class="grow open"><div class="title">${d.date}</div>
+    const title=d.date==="unknown"?' title="Recorded before the device clock was set"':'';
+    row.innerHTML=`<div class="grow open"${title}><div class="title">${dlabel(d.date)}</div>
       <div class="meta">${d.count} clip(s)</div></div>
-      <a class="btn" href="/zip?date=${d.date}">Download day</a>`;
+      <a class="btn" href="/zip?date=${encodeURIComponent(d.date)}">Download day</a>`;
     row.querySelector(".open").onclick=()=>openDate(d.date);
     el.appendChild(row);
   }
@@ -198,7 +199,7 @@ async function openDate(date){
   state.date=date;state.sel.clear();
   const d=await api("/api/clips?date="+encodeURIComponent(date));
   state.clips=d.clips;
-  $("#sub").textContent=date+" \\u2022 "+d.clips.length+" clip(s)";
+  $("#sub").textContent=dlabel(date)+" \\u2022 "+d.clips.length+" clip(s) \\u00b7 times in UTC";
   renderCams();
   renderClips();
 }
@@ -217,15 +218,18 @@ function renderClips(){
   $("#crumb").firstChild.onclick=loadDates;
   const el=$("#list");el.innerHTML="";
   const cams=camList();
+  const unknown=state.date==="unknown";
   const clips=state.clips.filter(c=>c.cameras.some(x=>cams.includes(x.slug)));
   if(!clips.length){el.innerHTML='<div class="empty">No clips for this camera</div>';}
   for(const c of clips){
     const row=document.createElement("div");row.className="row";
     const total=c.cameras.filter(x=>cams.includes(x.slug)).reduce((a,x)=>a+x.size,0);
     const on=state.sel.has(c.seg);
+    const title=unknown?"Time unknown":c.time+" UTC";
+    const sub=unknown?"Segment "+c.seg:"segment "+c.seg.split("--").pop();
     row.innerHTML=`<div class="check ${on?"on":""}"></div>
-      <div class="grow"><div class="title">${c.time}</div>
-      <div class="meta">segment ${c.seg.split("--").pop()} \\u2022 ${fmt(total)}</div></div>
+      <div class="grow"><div class="title">${title}</div>
+      <div class="meta">${sub} \\u2022 ${fmt(total)}</div></div>
       <div class="acts"></div>`;
     const acts=row.querySelector(".acts");
     for(const cam of cams){
@@ -357,7 +361,7 @@ async def handle_logout(_request: web.Request) -> web.Response:
 
 async def handle_dates(_request: web.Request) -> web.Response:
   counts = library.list_date_counts()
-  dates = [{"date": d, "count": counts[d]} for d in sorted(counts, reverse=True)]
+  dates = [{"date": d, "count": counts[d]} for d in library.sorted_date_groups(counts)]
   return web.json_response({"dates": dates})
 
 
@@ -372,7 +376,10 @@ async def handle_clips(request: web.Request) -> web.Response:
     info = library.segment_info(name, seg_dir, mtime)
     if info["cameras"]:
       clips.append(info)
-  clips.sort(key=lambda c: c["mtime"], reverse=True)
+  if date == timeutil.UNKNOWN_DATE:
+    clips.sort(key=lambda c: c["seg"])
+  else:
+    clips.sort(key=lambda c: c["mtime"], reverse=True)
   return web.json_response({"date": date, "clips": clips})
 
 
@@ -418,12 +425,17 @@ async def handle_zip(request: web.Request) -> web.StreamResponse:
     for cam in cams:
       path = library.camera_path(name, cam)
       if path is not None:
-        entries.append((f"{name}_{cam}.mp4", mtime, path))
+        if library.date_of(mtime) == timeutil.UNKNOWN_DATE:
+          archive_name = f"{timeutil.UNKNOWN_DATE}/{name}_{cam}.mp4"
+        else:
+          stamp = timeutil.time_text(mtime).replace(":", "-")
+          archive_name = f"{library.date_of(mtime)}/{stamp}_{cam}.mp4"
+        entries.append((archive_name, mtime, path))
 
   if not entries:
     raise web.HTTPNotFound(text="nothing to download")
 
-  label = date or time.strftime("%Y-%m-%d")
+  label = date or timeutil.today_text()
   response = web.StreamResponse(headers={
     "Content-Type": "application/zip",
     "Content-Disposition": f'attachment; filename="dashcam_{label}.zip"',
@@ -433,7 +445,7 @@ async def handle_zip(request: web.Request) -> web.StreamResponse:
   await response.prepare(request)
   _ACTIVE_STREAMS += 1
   try:
-    zipper = _ZipStream(response)
+    zipper = ZipStream(response)
     for name, mtime, path in entries:
       await zipper.add(name, mtime, _mp4_chunks(path))
     await zipper.finish()
@@ -462,71 +474,6 @@ async def _mp4_chunks(path: str):
       except ProcessLookupError:
         pass
     await proc.wait()
-
-
-def _dos_datetime(mtime: float) -> tuple[int, int]:
-  t = time.localtime(mtime)
-  dos_time = (t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec // 2)
-  dos_date = (max(t.tm_year - 1980, 0) << 9) | (t.tm_mon << 5) | t.tm_mday
-  return dos_time, dos_date
-
-
-class _ZipStream:
-  """Minimal streaming ZIP writer (store method, data descriptors).
-
-  The archive is written straight to the client as it is produced, so a large
-  selection never has to be buffered in memory or on disk. Sizes and CRCs are
-  unknown up front, so each entry uses a data descriptor; a ZIP64 end record is
-  emitted when the archive as a whole exceeds the 4 GiB classic limit.
-  """
-
-  def __init__(self, response: web.StreamResponse):
-    self._response = response
-    self._entries: list = []
-    self._offset = 0
-
-  async def _write(self, data: bytes) -> None:
-    await self._response.write(data)
-    self._offset += len(data)
-
-  async def add(self, name: str, mtime: float, chunks) -> None:
-    raw_name = name.encode("utf-8")
-    dos_time, dos_date = _dos_datetime(mtime)
-    offset = self._offset
-    header = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0x0008, 0, dos_time, dos_date,
-                         0, 0, 0, len(raw_name), 0)
-    await self._write(header + raw_name)
-
-    crc = 0
-    size = 0
-    async for chunk in chunks:
-      crc = zlib.crc32(chunk, crc)
-      size += len(chunk)
-      await self._write(chunk)
-
-    crc &= 0xFFFFFFFF
-    await self._write(struct.pack("<IIII", 0x08074B50, crc, size, size))
-    self._entries.append((raw_name, crc, size, offset, dos_time, dos_date))
-
-  async def finish(self) -> None:
-    central_offset = self._offset
-    for raw_name, crc, size, offset, dos_time, dos_date in self._entries:
-      record = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0x0008, 0, dos_time, dos_date,
-                           crc, size, size, len(raw_name), 0, 0, 0, 0, 0, offset)
-      await self._write(record + raw_name)
-
-    central_size = self._offset - central_offset
-    count = len(self._entries)
-    if central_offset > 0xFFFFFFFF or central_size > 0xFFFFFFFF or count > 0xFFFF:
-      zip64_offset = self._offset
-      await self._write(struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0,
-                                    count, count, central_size, central_offset))
-      await self._write(struct.pack("<IIQI", 0x07064B50, 0, zip64_offset, 1))
-      await self._write(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 0xFFFF, 0xFFFF,
-                                    0xFFFFFFFF, 0xFFFFFFFF, 0))
-    else:
-      await self._write(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, count, count,
-                                    central_size, central_offset, 0))
 
 
 _CERT_SIGNATURE = ""
