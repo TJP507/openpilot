@@ -37,11 +37,13 @@ class FakePPP:
     self.starts = 0
     self.kills = 0
     self.resets = 0
+    self.started_at = 0.0
 
   def start(self) -> None:
     self.starts += 1
     self._running = True
     self._exited = False
+    self.started_at = modem.time.monotonic()
 
   def kill(self) -> None:
     self.kills += 1
@@ -148,6 +150,19 @@ def test_connecting_starts_pppd_once_and_waits_for_ip(env, monkeypatch):
   assert fake.starts == 1
 
 
+def test_connecting_times_out_waiting_for_ip(env, monkeypatch):
+  m, fake, clock, tmp_path = env
+  monkeypatch.setattr(m, "_ppp0_addr", lambda: ("", ""))
+  assert m._step(modem.State.CONNECTING) == modem.State.CONNECTING  # starts pppd
+  assert fake.started_at == clock.t
+  # pppd is alive but never gets an IP: past the timeout it's a dial failure.
+  clock.t += modem.CONNECT_TIMEOUT + 1
+  assert m._step(modem.State.CONNECTING) == modem.State.CONNECTING  # retry (fail 1)
+  assert fake.kills == 1
+  assert fake.fails == 1
+  assert read_state(tmp_path)["last_error"] == "Timed out waiting for an IP address"
+
+
 def test_ip_appears_transitions_to_connected(env, monkeypatch):
   m, fake, _clock, tmp_path = env
   fake.start()
@@ -160,12 +175,13 @@ def test_ip_appears_transitions_to_connected(env, monkeypatch):
 
 
 def test_connected_without_ip_is_a_dial_failure(env, monkeypatch):
-  m, fake, _clock, _tmp = env
+  m, fake, _clock, tmp_path = env
   fake.start()
   monkeypatch.setattr(m, "_ppp0_addr", lambda: ("", ""))
   assert m._step(modem.State.CONNECTED) == modem.State.CONNECTING
   assert fake.kills == 1
   assert fake.fails == 1
+  assert read_state(tmp_path)["last_error"] == "Connection lost (no IP on ppp0)"
 
 
 def test_pppd_exit_while_connected_is_a_dial_failure(env):

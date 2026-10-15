@@ -100,6 +100,9 @@ BACKOFF_SCHEDULE = (10, 30, 60, 120, 300)
 BACKOFF_MAX = 300
 BACKOFF_JITTER = 0.2
 STABLE_SECONDS = 60.0
+# pppd must produce a ppp0 IPv4 address within this many seconds of starting;
+# otherwise it is treated as a dial failure (e.g. an IPCP stall).
+CONNECT_TIMEOUT = 60.0
 
 INITIAL_STATE = {
   "seconds_since_boot": 0,
@@ -212,12 +215,14 @@ class PPPSession:
     self._log_fh = None
     self._log_path = ""
     self._log_offset = 0
+    self.started_at = 0.0
 
   def start(self):
     self._rotate_log()
     self._log_offset = _file_size(self._log_path)
     out = self._open_log()
     self._proc = subprocess.Popen(PPPD_CMD, stdout=out, stderr=out)
+    self.started_at = time.monotonic()
     self._peer = ""
     logging.info(f"PPP dialing CID {DIAL_CID}")
 
@@ -549,14 +554,19 @@ class Modem:
 
   def _do_connecting(self):
     # pppd dials in the background; CONNECTING lasts until ppp0 actually has an
-    # IPv4 address. A pppd exit before that is a dial failure, not a drop from
-    # CONNECTED.
+    # IPv4 address. A pppd exit before that — or an IPCP stall past
+    # CONNECT_TIMEOUT — is a dial failure, not a drop from CONNECTED.
     if self._ppp.has_exited():
       return self._on_dial_failure()
     if self._ppp.running:
       ip, peer = self._ppp0_addr()
       if ip:
         return self._on_connected(ip, peer)
+      if self._ppp.started_at and time.monotonic() - self._ppp.started_at >= CONNECT_TIMEOUT:
+        _, tail = self._ppp.capture_exit()
+        logging.warning(f"no IP after {CONNECT_TIMEOUT:.0f}s (last pppd log: {tail[-1] if tail else 'none'})")
+        self._ppp.kill()
+        return self._on_dial_failure("Timed out waiting for an IP address")
       return State.CONNECTING
     logging.info("starting pppd")
     self._ppp.reset_fail_counter()
@@ -573,9 +583,10 @@ class Modem:
     self._publish_state(ip_address=ip, connected=True, last_error="", last_error_at=0, retry_in=0, **self._fail_fields())
     return State.CONNECTED
 
-  def _on_dial_failure(self):
-    rc, tail = self._ppp.capture_exit()
-    reason = _summarize_pppd_failure(rc, tail)
+  def _on_dial_failure(self, reason: str | None = None):
+    if reason is None:
+      rc, tail = self._ppp.capture_exit()
+      reason = _summarize_pppd_failure(rc, tail)
     give_up = self._ppp.record_fail()
     logging.warning(f"PPP dial failed ({self._ppp.fails}/{self._ppp.MAX_FAILS}): {reason}")
     self._publish_state(last_error=reason, last_error_at=time.monotonic(), **self._fail_fields())
@@ -623,10 +634,12 @@ class Modem:
     ip, _ = self._ppp0_addr()
     if not ip:
       # pppd is still up but ppp0 lost its address: treat it as a dial failure
-      # so we never report CONNECTED without an IP.
+      # so we never report CONNECTED without an IP. Capture the pppd tail before
+      # kill() clears the process.
       logging.warning("ppp0 lost its address while connected")
+      self._ppp.capture_exit()
       self._ppp.kill()
-      return self._on_dial_failure()
+      return self._on_dial_failure("Connection lost (no IP on ppp0)")
 
     self._poll()
     self._mark_stable()
