@@ -38,10 +38,12 @@ def _run(args, timeout=60, check=False) -> tuple[int, str]:
 
 
 def _is_onroad() -> bool:
+  """Fail CLOSED: if the onroad state can't be read, assume onroad (refuse)."""
   try:
     return bool(Params().get_bool("IsOnroad"))
-  except Exception:
-    return False
+  except Exception as e:
+    log.warning(f"could not read IsOnroad, assuming onroad: {e}")
+    return True
 
 
 def _json(obj) -> str:

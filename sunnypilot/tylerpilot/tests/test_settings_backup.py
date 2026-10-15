@@ -67,6 +67,15 @@ def test_denylist_keys_exist_in_registry():
   assert [k for k in settings_backup.DENYLIST if k not in reg] == []
 
 
+def test_confirm_required_keys_are_allowlisted():
+  assert [k for k in settings_backup.CONFIRM_REQUIRED if k not in settings_backup.ALLOWLIST] == []
+
+
+def test_alpha_longitudinal_is_denied():
+  assert "AlphaLongitudinalEnabled" in settings_backup.DENYLIST
+  assert "AlphaLongitudinalEnabled" not in settings_backup.ALLOWLIST
+
+
 # --------------------------------------------------------------------------
 # build / parse
 # --------------------------------------------------------------------------
@@ -168,6 +177,50 @@ def test_diff_unknown_parameter(fake_params, monkeypatch):
   assert entry["reason"] == "unknown parameter"
 
 
+def test_diff_experimental_mode_skipped_until_confirmed(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+  entry = settings_backup.diff(_doc({"ExperimentalMode": True}))[0]
+  assert entry["status"] == "skipped"
+  assert entry["reason"] == settings_backup.CONFIRM_REQUIRED["ExperimentalMode"]
+
+
+def test_diff_experimental_mode_allowed_once_confirmed(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+  fake_params.values["ExperimentalModeConfirmed"] = True
+  entry = settings_backup.diff(_doc({"ExperimentalMode": True}))[0]
+  assert entry["status"] == "change"
+
+
+def test_diff_experimental_mode_false_is_allowed(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+  entry = settings_backup.diff(_doc({"ExperimentalMode": False}))[0]
+  assert entry["status"] == "change"
+
+
+def test_diff_toyota_toggles_require_on_device_enable(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+  by_key = {e["key"]: e for e in settings_backup.diff(
+    _doc({"ToyotaStopAndGoHack": True, "ToyotaEnforceStockLongitudinal": True}))}
+  assert by_key["ToyotaStopAndGoHack"]["status"] == "skipped"
+  assert by_key["ToyotaEnforceStockLongitudinal"]["status"] == "skipped"
+
+
+def test_build_backup_uses_registry_defaults(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "_firmware_version", lambda: "v")
+  fake_params.defaults["IsMetric"] = True
+  fake_params.defaults["LanguageSetting"] = "en"
+  doc = json.loads(settings_backup.build_backup())
+  assert doc["params"] == {"IsMetric": True, "LanguageSetting": "en"}
+
+
+def test_diff_current_uses_registry_defaults(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+  fake_params.defaults["IsMetric"] = True
+  entry = settings_backup.diff(_doc({"IsMetric": True}))[0]
+  assert entry["status"] == "same"
+  assert entry["current"] is True
+
+
 # --------------------------------------------------------------------------
 # apply
 # --------------------------------------------------------------------------
@@ -175,9 +228,21 @@ def test_apply_writes_only_changes(fake_params, monkeypatch):
   monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
   fake_params.values["IsMetric"] = True
   counts = settings_backup.apply(_doc({"IsMetric": True, "Mads": True, "GithubSshKeys": "x"}))
-  assert counts == {"applied": 1, "skipped": 1, "unchanged": 1}
+  assert counts == {"applied": 1, "skipped": 1, "unchanged": 1, "failed": []}
   assert fake_params.values["Mads"] is True
   assert fake_params.values["IsMetric"] is True
+
+
+def test_apply_reports_write_failures(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "param_exists", lambda k: True)
+
+  def _boom(key, value, *args, **kwargs):
+    raise RuntimeError("disk full")
+
+  monkeypatch.setattr(fake_params, "put", _boom)
+  counts = settings_backup.apply(_doc({"Mads": True}))
+  assert counts["applied"] == 0
+  assert counts["failed"] == [{"key": "Mads", "error": "disk full"}]
 
 
 def test_apply_coerces_int_to_float(fake_params, monkeypatch):

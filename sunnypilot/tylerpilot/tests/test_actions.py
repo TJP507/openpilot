@@ -66,6 +66,18 @@ def test_poweroff_refuses_when_onroad(monkeypatch):
   assert actions.poweroff({})[0] is False
 
 
+class _BrokenParams:
+  def get_bool(self, key, *args, **kwargs):
+    raise OSError("params unavailable")
+
+
+def test_is_onroad_fails_closed(monkeypatch):
+  monkeypatch.setattr(actions, "Params", _BrokenParams)
+  assert actions._is_onroad() is True
+  ok, msg, _, deferred = actions.run("reboot", {})
+  assert ok is False and msg == actions.ONROAD_MSG and deferred is None
+
+
 # --------------------------------------------------------------------------
 # update
 # --------------------------------------------------------------------------
@@ -146,15 +158,25 @@ def test_diagnostics_excludes_settings(monkeypatch):
 
 def test_diagnostics_redacts_secrets(monkeypatch):
   pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecretAAAA\n-----END OPENSSH PRIVATE KEY-----"
-  blob = f'{{"token":"abc123"}} {pem} deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+  hex_token = "0123456789abcdef" * 4  # 64 hex, like the device token
+  blob = f'{{"token":"abc123"}} {pem} {hex_token}'
   monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, blob))
   _, _, artifact = actions.diagnostics({})
   with tarfile.open(fileobj=io.BytesIO(base64.b64decode(artifact["data"])), mode="r:gz") as t:
     text = b"".join(t.extractfile(n).read() for n in t.getnames() if t.extractfile(n))
-  assert b"deadbeefdeadbeef" not in text
+  assert hex_token.encode() not in text
   assert b"BEGIN OPENSSH PRIVATE KEY" not in text
   assert b"abc123" not in text
   assert b"<redacted" in text
+
+
+def test_diagnostics_keeps_git_sha(monkeypatch):
+  sha = "0123456789abcdef0123456789abcdef01234567"  # 40-char git SHA
+  monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, sha))
+  _, _, artifact = actions.diagnostics({})
+  with tarfile.open(fileobj=io.BytesIO(base64.b64decode(artifact["data"])), mode="r:gz") as t:
+    text = b"".join(t.extractfile(n).read() for n in t.getnames() if t.extractfile(n))
+  assert sha.encode() in text
 
 
 # --------------------------------------------------------------------------
@@ -200,7 +222,7 @@ def test_restore_apply_writes_and_snapshots(fake_params, monkeypatch):
   ok, result, artifact = actions.restore({"artifact_id": "a", "dry_run": False})
   assert ok is True
   out = json.loads(result)
-  assert out == {"applied": 1, "skipped": 1, "unchanged": 0, "reboot_recommended": True}
+  assert out == {"applied": 1, "skipped": 1, "unchanged": 0, "failed": [], "reboot_recommended": True}
   assert fake_params.values["Mads"] is True
   assert artifact["kind"] == "backup" and artifact["label"].startswith("pre-restore-")
 

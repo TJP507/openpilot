@@ -105,12 +105,17 @@ extracts files:
   migration markers are refused (e.g. `GithubSshKeys`, `SecOCKey`,
   `CarPlatformBundle`, `LiveDelay`, `ModelManager_ModelsCache`). Tokens, keys,
   logs, and anything under `/data/community` are never included.
+- **Safety-gated toggles** — enabling a toggle that shows a safety dialog on the
+  device (Experimental Mode, the Toyota stop-and-go/enforce-stock toggles) is
+  skipped on restore so the notice isn't bypassed; Experimental Mode is allowed
+  once `ExperimentalModeConfirmed` is already true on this device.
 - **Restore is two-phase**: a **preview** (`dry_run`, the default) downloads and
   validates the artifact and returns a per-key diff (change / same / skipped,
   with a reason) without writing; an **apply** (`dry_run: false`) snapshots the
   current settings into a `pre-restore-<UTC>.json` artifact, writes only the
-  "change" entries, and reports `{applied, skipped, unchanged,
-  reboot_recommended}`. A reboot is recommended whenever anything changed.
+  "change" entries (blocking until each is on disk), and reports `{applied,
+  skipped, unchanged, failed: [{key, error}], reboot_recommended}`. A reboot is
+  recommended whenever anything changed.
 - Cross-device restore is allowed; the server warns using the backup's `source`.
 
 The allow/deny lists and declared types are asserted against

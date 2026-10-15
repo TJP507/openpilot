@@ -55,22 +55,26 @@ _install_params_stub()
 class FakeParams:
   """In-memory stand-in for the compiled Params binding."""
 
-  def __init__(self, values: dict | None = None, known: set[str] | None = None) -> None:
+  def __init__(self, values: dict | None = None, known: set[str] | None = None,
+               defaults: dict | None = None) -> None:
     self.values = dict(values or {})
     self.known = set(known or ())
+    self.defaults = dict(defaults or {})
 
   def check_key(self, key):
     if key not in self.known:
       raise KeyError(key)
     return key
 
-  def get(self, key, *args, **kwargs):
-    return self.values.get(key)
+  def get(self, key, *args, return_default=False, **kwargs):
+    if key in self.values:
+      return self.values[key]
+    return self.defaults.get(key) if return_default else None
 
   def get_bool(self, key, *args, **kwargs):
-    return bool(self.values.get(key, False))
+    return bool(self.get(key, return_default=True))
 
-  def put(self, key, value, *args, **kwargs) -> None:
+  def put(self, key, value, *args, block=False, **kwargs) -> None:
     if self.known and key not in self.known:
       raise KeyError(key)
     self.values[key] = value

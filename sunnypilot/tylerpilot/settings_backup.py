@@ -39,7 +39,6 @@ MAX_VALUE_BYTES = 16 * 1024
 # Param key -> category, for every BACKUP-flagged key we are willing to move
 # between devices. See DENYLIST for the BACKUP keys we refuse.
 ALLOWLIST: dict[str, str] = {
-  "AlphaLongitudinalEnabled": "Longitudinal",
   "AlwaysOnDM": "Driving",
   "AutoLaneChangeBsmDelay": "Lateral",
   "AutoLaneChangeTimer": "Lateral",
@@ -55,7 +54,7 @@ ALLOWLIST: dict[str, str] = {
   "CustomAccShortPressIncrement": "Longitudinal",
   "CustomTorqueParams": "Lateral",
   "DevUIInfo": "Display",
-  "DisablePowerDown": "Vehicle",
+  "DisablePowerDown": "Power",
   "DisengageOnAccelerator": "Driving",
   "DynamicExperimentalControl": "Driving",
   "EnableSunnylinkUploader": "Network",
@@ -84,8 +83,8 @@ ALLOWLIST: dict[str, str] = {
   "MadsMainCruiseAllowed": "Lateral",
   "MadsSteeringMode": "Lateral",
   "MadsUnifiedEngagementMode": "Lateral",
-  "MaxTimeOffroad": "Vehicle",
-  "ModelManager_Favs": "Vehicle",
+  "MaxTimeOffroad": "Power",
+  "ModelManager_Favs": "Models",
   "NetworkMetered": "Network",
   "NeuralNetworkLateralControl": "Lateral",
   "OnroadScreenOffBrightness": "Display",
@@ -93,7 +92,7 @@ ALLOWLIST: dict[str, str] = {
   "OnroadUploads": "Network",
   "OpenpilotEnabledToggle": "Driving",
   "PlanplusControl": "Longitudinal",
-  "QuickBootToggle": "Vehicle",
+  "QuickBootToggle": "Power",
   "QuietMode": "Display",
   "RainbowMode": "Display",
   "RecordAudio": "Recording",
@@ -128,6 +127,7 @@ ALLOWLIST: dict[str, str] = {
 # per-device calibration/state, caches, or one-shot migration markers.
 DENYLIST: dict[str, str] = {
   "AdbEnabled": "Enables ADB debug access; security-sensitive, per device.",
+  "AlphaLongitudinalEnabled": "Alpha longitudinal must be enabled on the device so its safety warning is acknowledged.",
   "CarPlatformBundle": "Vehicle fingerprint tied to this car/platform.",
   "DeviceBootMode": "Device boot/partition mode; recovery-sensitive, per device.",
   "DisableUpdates": "Blocks over-the-air updates; device fleet management, not a user setting.",
@@ -144,10 +144,19 @@ DENYLIST: dict[str, str] = {
   "SshEnabled": "Enables remote SSH access; security-sensitive, per device.",
 }
 
+# Allowlisted toggles whose *enable* shows a safety confirmation dialog on the
+# device. Restoring them as true would bypass that notice, so diff() skips them
+# (ExperimentalMode is allowed once ExperimentalModeConfirmed is already true on
+# this device).
+CONFIRM_REQUIRED: dict[str, str] = {
+  "ExperimentalMode": "Turn on Experimental Mode once on the device to accept its safety notice",
+  "ToyotaEnforceStockLongitudinal": "Enable on the device to accept its safety notice",
+  "ToyotaStopAndGoHack": "Enable on the device to accept its safety notice",
+}
+
 # Declared type of every ALLOWLIST key, mirroring common/params_keys.h. The
 # tests assert this matches the registry so an upstream type change is caught.
 _TYPES: dict[str, str] = {
-  "AlphaLongitudinalEnabled": "bool",
   "AlwaysOnDM": "bool",
   "AutoLaneChangeBsmDelay": "bool",
   "AutoLaneChangeTimer": "int",
@@ -258,15 +267,20 @@ def param_type(key: str) -> str | None:
 
 
 def read_param(key: str):
-  """Current value as a native Python value, or None if unset/unavailable."""
+  """Current value (falling back to the registry default) or None if unset.
+
+  return_default=True so a never-touched setting is captured at its default;
+  otherwise a restore would leave the target's differing value in place.
+  """
   try:
-    return Params().get(key)
+    return Params().get(key, return_default=True)
   except Exception:
     return None
 
 
 def write_param(key: str, value) -> None:
-  Params().put(key, value)
+  """Write and block until the value is on disk."""
+  Params().put(key, value, block=True)
 
 
 # --------------------------------------------------------------------------
@@ -390,6 +404,15 @@ def parse_backup(raw: bytes) -> dict:
 # --------------------------------------------------------------------------
 # diff / apply
 # --------------------------------------------------------------------------
+def _confirmed_on_device(key: str) -> bool:
+  """Whether the on-device safety acknowledgment for `key` is already given.
+
+  Only ExperimentalMode has a persisted confirmation flag; the Toyota toggles
+  show their dialog every time, so they can never be confirmed remotely.
+  """
+  return key == "ExperimentalMode" and bool(read_param("ExperimentalModeConfirmed"))
+
+
 def diff(backup: dict) -> list[dict]:
   """Classify every incoming entry without writing anything.
 
@@ -421,6 +444,9 @@ def diff(backup: dict) -> list[dict]:
     elif _value_size(value) > MAX_VALUE_BYTES:
       entry["status"] = "skipped"
       entry["reason"] = f"value exceeds {MAX_VALUE_BYTES} bytes"
+    elif key in CONFIRM_REQUIRED and value is True and not _confirmed_on_device(key):
+      entry["status"] = "skipped"
+      entry["reason"] = CONFIRM_REQUIRED[key]
     else:
       current = read_param(key)
       entry["current"] = current if _json_native(current) else None
@@ -430,8 +456,13 @@ def diff(backup: dict) -> list[dict]:
 
 
 def apply(backup: dict) -> dict:
-  """Write only the "change" entries; return {"applied", "skipped", "unchanged"}."""
+  """Write only the "change" entries; report per-key failures.
+
+  Returns {"applied", "skipped", "unchanged", "failed": [{key, error}, ...]}.
+  A write that raises is reported in "failed" (never counted as skipped).
+  """
   applied = skipped = unchanged = 0
+  failed: list[dict] = []
   for entry in diff(backup):
     if entry["status"] == "skipped":
       skipped += 1
@@ -441,6 +472,6 @@ def apply(backup: dict) -> dict:
       try:
         write_param(entry["key"], _coerce(entry["incoming"], param_type(entry["key"])))
         applied += 1
-      except Exception:
-        skipped += 1
-  return {"applied": applied, "skipped": skipped, "unchanged": unchanged}
+      except Exception as e:
+        failed.append({"key": entry["key"], "error": str(e)})
+  return {"applied": applied, "skipped": skipped, "unchanged": unchanged, "failed": failed}

@@ -63,11 +63,20 @@ def test_trim_missing_file_is_noop(tmp_path, monkeypatch):
 
 
 def test_redact_bearer_and_hex():
-  text = "auth: Bearer abc123tokenvalue; commit deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-  out = log.redact(text)
+  sha = "0123456789abcdef0123456789abcdef01234567"  # 40-char git SHA: keep
+  token = "0123456789abcdef" * 4  # 64 hex device token: redact
+  out = log.redact(f"auth: Bearer abc123tokenvalue; sha {sha}; tok {token}")
   assert "abc123tokenvalue" not in out
-  assert "deadbeefdeadbeef" not in out
+  assert token not in out
+  assert sha in out
   assert "Bearer <redacted>" in out
+
+
+def test_redact_base64_key_body():
+  body = "AAAAB3NzaC1yc2EAAAADAQAB9gQC7AbcD1234EFghIJklMNopQRstUVwxYZ5678"  # mixed case + digits
+  assert body not in log.redact(f"key: {body}")
+  # A 40-char lowercase identifier is not a secret and must survive.
+  assert "abcdefghijklmnopqrstuvwxyzabcdefghijklmn" in log.redact("id: abcdefghijklmnopqrstuvwxyzabcdefghijklmn")
 
 
 def test_redact_private_key_and_json_fields():
