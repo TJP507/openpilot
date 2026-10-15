@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from openpilot.sunnypilot.tylerpilot import agent, client, config
@@ -136,3 +138,96 @@ def test_ensure_server_key_noop_when_revoked(state, monkeypatch):
   monkeypatch.setattr(client, "install_server_key", lambda k: installed.append(k))
   agent._ensure_server_key()
   assert installed == []
+
+
+# --------------------------------------------------------------------------
+# gather_stats
+# --------------------------------------------------------------------------
+class _OnroadParams:
+  def get_bool(self, key, *args, **kwargs):
+    return True
+
+
+class _BrokenParams:
+  def get_bool(self, key, *args, **kwargs):
+    raise OSError("params unavailable")
+
+
+def test_classify_network_types():
+  assert agent._classify("rmnet_data0") == "cell"
+  assert agent._classify("wwan0") == "cell"
+  assert agent._classify("wlan0") == "wifi"
+  assert agent._classify("eth0") == "ethernet"
+  assert agent._classify("usb0") == "ethernet"
+  assert agent._classify("") is None
+
+
+def test_gather_stats_reports_available_fields(monkeypatch):
+  monkeypatch.setattr(agent, "get_version", lambda: "2026.002.029")
+  monkeypatch.setattr(agent, "get_short_branch", lambda: "dev-c3x")
+  monkeypatch.setattr(agent, "get_commit", lambda: "abcdef1234567890")
+  monkeypatch.setattr(agent, "_net_type", lambda: "wifi")
+  monkeypatch.setattr(agent, "_cpu_temp", lambda: 42.5)
+  monkeypatch.setattr(agent, "_recordings_bytes", lambda: 999)
+  monkeypatch.setattr(agent, "Params", _OnroadParams)
+  monkeypatch.setattr(agent.psutil, "boot_time", lambda: 1000.0)
+  monkeypatch.setattr(agent.psutil, "cpu_percent", lambda interval=None: 12.34)
+  monkeypatch.setattr(agent.psutil, "virtual_memory", lambda: types.SimpleNamespace(percent=55.5))
+  monkeypatch.setattr(agent.psutil, "disk_usage", lambda p: types.SimpleNamespace(free=100, total=200))
+  monkeypatch.setattr(agent.time, "time", lambda: 1060.0)
+
+  s = agent.gather_stats()
+  assert s["version"] == "2026.002.029"
+  assert s["branch"] == "dev-c3x"
+  assert s["commit"] == "abcdef1"  # short
+  assert s["uptime_s"] == 60
+  assert s["started_at"] == 1000
+  assert s["cpu_temp_c"] == 42.5
+  assert s["cpu_pct"] == 12.3
+  assert s["mem_pct"] == 55.5
+  assert s["storage_free_bytes"] == 100
+  assert s["storage_total_bytes"] == 200
+  assert s["recordings_bytes"] == 999
+  assert s["net_type"] == "wifi"
+  assert s["onroad"] is True
+
+
+def test_gather_stats_omits_unknown_values(monkeypatch):
+  def boom(*a, **k):
+    raise OSError("unavailable")
+
+  monkeypatch.setattr(agent, "get_version", lambda: "")
+  monkeypatch.setattr(agent, "get_short_branch", lambda: "")
+  monkeypatch.setattr(agent, "get_commit", lambda: "")
+  monkeypatch.setattr(agent, "_net_type", lambda: "none")
+  monkeypatch.setattr(agent, "_cpu_temp", lambda: None)
+  monkeypatch.setattr(agent, "_recordings_bytes", lambda: None)
+  monkeypatch.setattr(agent, "Params", _BrokenParams)  # onroad unreadable
+  monkeypatch.setattr(agent.psutil, "boot_time", boom)
+  monkeypatch.setattr(agent.psutil, "cpu_percent", boom)
+  monkeypatch.setattr(agent.psutil, "virtual_memory", boom)
+  monkeypatch.setattr(agent.psutil, "disk_usage", boom)
+
+  s = agent.gather_stats()
+  assert s == {"net_type": "none"}  # nothing faked, unknowns omitted
+
+
+def test_recordings_bytes_cached(tmp_path, monkeypatch):
+  monkeypatch.setattr(agent, "_RECORDINGS_DIR", str(tmp_path))
+  monkeypatch.setattr(agent, "_recordings_cache", (0.0, -1))
+  clock = Clock()
+  monkeypatch.setattr(agent.time, "monotonic", clock)
+  (tmp_path / "a.mp4").write_bytes(b"x" * 100)
+
+  assert agent._recordings_bytes() == 100
+  # A change within the TTL is not re-scanned.
+  (tmp_path / "b.mp4").write_bytes(b"y" * 50)
+  assert agent._recordings_bytes() == 100
+  clock.t += agent._RECORDINGS_TTL + 1
+  assert agent._recordings_bytes() == 150
+
+
+def test_recordings_bytes_missing_dir(monkeypatch):
+  monkeypatch.setattr(agent, "_RECORDINGS_DIR", "/no/such/dir")
+  monkeypatch.setattr(agent, "_recordings_cache", (0.0, -1))
+  assert agent._recordings_bytes() is None

@@ -92,17 +92,46 @@ def test_update_refuses_when_onroad(monkeypatch):
   assert ok is False and msg == actions.ONROAD_MSG
 
 
-def test_update_switches_channel(tmp_path, monkeypatch):
+def test_update_switches_channel_and_reboots(tmp_path, monkeypatch):
   real_isdir = os.path.isdir
   monkeypatch.setattr(os.path, "isdir", lambda p: True if str(p).endswith(".git") else real_isdir(p))
   runs = []
-  monkeypatch.setattr(actions, "_run", lambda args, timeout=60, check=False: (runs.append(args), (0, ""))[1])
-  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
 
-  ok, msg, _ = actions.update({"channel": "dev-c3x"})
-  assert ok is True and "switched to dev-c3x" in msg
+  def fake_run(args, timeout=60, check=False):
+    runs.append(args)
+    if args[-3:-1] == ["rev-parse", "--short"]:
+      return 0, "abc1234\n"
+    return 0, ""
+
+  monkeypatch.setattr(actions, "_run", fake_run)
+  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
+  calls: dict = {}
+  monkeypatch.setattr(actions.toast, "show", lambda *a, **k: None)
+  monkeypatch.setattr(actions.time, "sleep", lambda s: None)
+  monkeypatch.setattr(actions.HARDWARE, "reboot", lambda: calls.setdefault("reboot", True))
+
+  ok, msg, artifact, deferred = actions.update({"channel": "dev-c3x"})
+  assert ok is True and artifact is None
+  assert msg == "Switched to dev-c3x (abc1234); rebooting…"
   assert any(args[:3] == ["git", "-C", "/data/openpilot"] for args in runs)
-  assert (tmp_path / "tylerpilot_restart_manager").exists()
+  # No restart-manager flag is written any more.
+  assert not (tmp_path / "tylerpilot_restart_manager").exists()
+  assert "reboot" not in calls  # deferred until the job result is posted
+  deferred()
+  assert calls["reboot"]
+
+
+def test_update_reports_channel_without_sha(tmp_path, monkeypatch):
+  real_isdir = os.path.isdir
+  monkeypatch.setattr(os.path, "isdir", lambda p: True if str(p).endswith(".git") else real_isdir(p))
+  monkeypatch.setattr(actions, "_run", lambda args, timeout=60, check=False: (1, "") if "rev-parse" in args else (0, ""))
+  monkeypatch.setattr(actions.toast, "show", lambda *a, **k: None)
+  monkeypatch.setattr(actions.time, "sleep", lambda s: None)
+  monkeypatch.setattr(actions.HARDWARE, "reboot", lambda: None)
+
+  ok, msg, _, deferred = actions.update({"channel": "staging-c3x"})
+  assert ok is True and msg == "Switched to staging-c3x; rebooting…"
+  assert callable(deferred)
 
 
 # --------------------------------------------------------------------------
@@ -252,6 +281,15 @@ def test_cleanup_legacy_prerestore(tmp_path, monkeypatch):
   assert actions.cleanup_legacy_prerestore() == 1
   assert not (tmp_path / "prerestore-1.tgz").exists()
   assert (tmp_path / "keep.json").exists()
+
+
+def test_cleanup_stale_restart_flag(tmp_path, monkeypatch):
+  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
+  (tmp_path / "tylerpilot_restart_manager").write_text("")
+  assert actions.cleanup_stale_restart_flag() is True
+  assert not (tmp_path / "tylerpilot_restart_manager").exists()
+  # Idempotent: a missing flag is not an error.
+  assert actions.cleanup_stale_restart_flag() is False
 
 
 def test_handlers_registry():

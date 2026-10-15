@@ -82,16 +82,6 @@ def poweroff(_payload: dict):
   return True, "Powering off…", None, _do
 
 
-def _restart_manager() -> None:
-  """Ask launch_chffrplus.sh to restart the manager (its flag-file loop)."""
-  flag = os.path.join(config.STATE_DIR, "tylerpilot_restart_manager")
-  try:
-    open(flag, "w").close()
-  except OSError:
-    return
-  _run(["pkill", "-f", "manager.py"])
-
-
 # --------------------------------------------------------------------------
 # update / channel switch
 # --------------------------------------------------------------------------
@@ -114,13 +104,23 @@ def update(payload: dict):
     return False, f"checkout failed: {out[-400:]}", None
   _run(["git", "-C", d, "reset", "--hard", f"origin/{channel}"], timeout=120)
 
-  # Keep the boot overlay source in sync so the change survives a reboot.
+  rc, out = _run(["git", "-C", d, "rev-parse", "--short", "HEAD"], timeout=30)
+  sha = out.strip() if rc == 0 else ""
+
+  # Keep the boot overlay source in sync so the change survives the reboot.
   finalized = "/data/safe_staging/finalized"
   if os.path.isdir(finalized):
     _run(["rsync", "-a", "--delete", "--exclude=.git", f"{d}/", f"{finalized}/"], timeout=600)
 
-  _restart_manager()
-  return True, f"switched to {channel}; restarting manager", None
+  # A reboot is the only reliable way to run the new code: the launcher is not
+  # re-run on a plain manager restart, and Params/processes are read at start-up.
+  def _do() -> None:
+    toast.show("TylerPilot: rebooting to apply the update…")
+    time.sleep(1)
+    HARDWARE.reboot()
+
+  where = f"{channel} ({sha})" if sha else channel
+  return True, f"Switched to {where}; rebooting…", None, _do
 
 
 # --------------------------------------------------------------------------
@@ -268,6 +268,20 @@ def cleanup_legacy_prerestore() -> int:
   if removed:
     log.info(f"removed {removed} legacy pre-restore snapshot(s)")
   return removed
+
+
+def cleanup_stale_restart_flag() -> bool:
+  """Remove the obsolete restart-manager flag.
+
+  Older firmware dropped a flag the launcher watched to restart the manager;
+  a reboot is now used instead, so any file left behind is inert."""
+  flag = os.path.join(config.STATE_DIR, "tylerpilot_restart_manager")
+  try:
+    os.remove(flag)
+    log.info("removed stale restart-manager flag")
+    return True
+  except OSError:
+    return False
 
 
 HANDLERS = {

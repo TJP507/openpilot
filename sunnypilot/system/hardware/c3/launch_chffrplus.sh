@@ -83,16 +83,7 @@ function launch {
   if [ ! -f $DIR/prebuilt ]; then
     ./build.py
   fi
-  while true; do
-    ./manager.py
-    # Remote "restart manager" (TylerPilot) drops this flag so we come back up
-    # instead of hanging on the error screen.
-    if [ -f /data/community/tylerpilot_restart_manager ]; then
-      rm -f /data/community/tylerpilot_restart_manager
-      continue
-    fi
-    break
-  done
+  ./manager.py
 
   # if broken, keep on screen error
   while true; do sleep 1; done
