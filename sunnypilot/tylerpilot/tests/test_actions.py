@@ -1,100 +1,83 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import os
+import tarfile
 
-from openpilot.sunnypilot.tylerpilot import actions, config, trips
+from openpilot.sunnypilot.tylerpilot import actions, client, config, settings_backup, trips
+
+
+class _OnroadParams:
+  def get_bool(self, key, *args, **kwargs):
+    return True
 
 
 def test_run_unknown_action():
-  ok, msg, artifact = actions.run("nope", {})
+  ok, msg, artifact, deferred = actions.run("nope", {})
   assert ok is False
   assert "unknown action" in msg
-  assert artifact is None
+  assert artifact is None and deferred is None
 
 
-def test_typed_coercion():
-  assert actions._typed(None) is None
-  assert actions._typed(b"1") is True
-  assert actions._typed(b"0") is False
-  assert actions._typed(b"hello") == "hello"
-  raw = b"\xff\xfe"
-  assert actions._typed(raw) == base64.b64encode(raw).decode()
+def test_run_normalizes_three_tuple(monkeypatch):
+  monkeypatch.setattr(trips, "recent_positions", lambda n=1: [{"lat": 1.0}])
+  ok, msg, artifact, deferred = actions.run("location", {})
+  assert ok is True and artifact["kind"] == "_location" and deferred is None
 
 
-def test_reboot(monkeypatch):
+# --------------------------------------------------------------------------
+# power
+# --------------------------------------------------------------------------
+def test_reboot_defers_until_after_report(monkeypatch):
   calls = {}
   monkeypatch.setattr(actions.toast, "show", lambda *a, **k: calls.setdefault("toast", True))
   monkeypatch.setattr(actions.time, "sleep", lambda s: None)
   monkeypatch.setattr(actions.HARDWARE, "reboot", lambda: calls.setdefault("reboot", True))
-  ok, msg, artifact = actions.reboot({})
-  assert ok is True
-  assert msg == "rebooting"
-  assert calls["toast"] and calls["reboot"]
-  assert artifact is None
+  ok, msg, artifact, deferred = actions.reboot({})
+  assert ok is True and msg == "Rebooting…" and artifact is None
+  assert callable(deferred)
+  assert "reboot" not in calls  # nothing has happened yet
+  deferred()
+  assert calls["reboot"] and calls["toast"]
 
 
-def test_poweroff(monkeypatch):
+def test_poweroff_defers(monkeypatch):
   calls = {}
   monkeypatch.setattr(actions.toast, "show", lambda *a, **k: None)
   monkeypatch.setattr(actions.time, "sleep", lambda s: None)
   monkeypatch.setattr(actions.HARDWARE, "shutdown", lambda: calls.setdefault("shutdown", True))
-  ok, msg, _ = actions.poweroff({})
-  assert ok is True and msg == "powering off" and calls["shutdown"]
+  ok, msg, _, deferred = actions.poweroff({})
+  assert ok is True and msg == "Powering off…"
+  assert "shutdown" not in calls
+  deferred()
+  assert calls["shutdown"]
 
 
-def test_restart_manager_sets_flag(tmp_path, monkeypatch):
-  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
-  monkeypatch.setattr(actions.toast, "show", lambda *a, **k: None)
-  monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, ""))
-  ok, msg, _ = actions.restart_manager({})
-  assert ok is True
-  assert (tmp_path / "tylerpilot_restart_manager").exists()
+def test_reboot_refuses_when_onroad(monkeypatch):
+  monkeypatch.setattr(actions, "Params", _OnroadParams)
+  ok, msg, artifact, deferred = actions.run("reboot", {})
+  assert ok is False and msg == actions.ONROAD_MSG and deferred is None
 
 
-def test_param_get(monkeypatch):
-  class _P:
-    def get(self, key):
-      return b"value"
-
-  monkeypatch.setattr(actions, "Params", _P)
-  ok, val, _ = actions.param_get({"key": "Foo"})
-  assert ok is True and val == "value"
-  ok, msg, _ = actions.param_get({})
-  assert ok is False and msg == "no key"
+def test_poweroff_refuses_when_onroad(monkeypatch):
+  monkeypatch.setattr(actions, "Params", _OnroadParams)
+  assert actions.poweroff({})[0] is False
 
 
-def test_param_set_dispatch(monkeypatch):
-  calls = {}
-
-  class _P:
-    def put_bool(self, k, v):
-      calls[k] = ("bool", v)
-
-    def put_int(self, k, v):
-      calls[k] = ("int", v)
-
-    def put_float(self, k, v):
-      calls[k] = ("float", v)
-
-    def put(self, k, v):
-      calls[k] = ("str", v)
-
-  monkeypatch.setattr(actions, "Params", _P)
-  assert actions.param_set({"key": "B", "value": True})[0] is True
-  assert actions.param_set({"key": "I", "value": 3})[0] is True
-  assert actions.param_set({"key": "F", "value": 1.5})[0] is True
-  assert actions.param_set({"key": "S", "value": "x"})[0] is True
-  assert calls["B"] == ("bool", True)
-  assert calls["I"] == ("int", 3)
-  assert calls["F"] == ("float", 1.5)
-  assert calls["S"] == ("str", "x")
-  assert actions.param_set({})[0] is False
-
-
+# --------------------------------------------------------------------------
+# update
+# --------------------------------------------------------------------------
 def test_update_rejects_unknown_channel():
   ok, msg, _ = actions.update({"channel": "nope"})
   assert ok is False and "unknown channel" in msg
+
+
+def test_update_refuses_when_onroad(monkeypatch):
+  monkeypatch.setattr(actions, "Params", _OnroadParams)
+  ok, msg, _ = actions.update({"channel": "dev-c3x"})
+  assert ok is False and msg == actions.ONROAD_MSG
 
 
 def test_update_switches_channel(tmp_path, monkeypatch):
@@ -102,14 +85,17 @@ def test_update_switches_channel(tmp_path, monkeypatch):
   monkeypatch.setattr(os.path, "isdir", lambda p: True if str(p).endswith(".git") else real_isdir(p))
   runs = []
   monkeypatch.setattr(actions, "_run", lambda args, timeout=60, check=False: (runs.append(args), (0, ""))[1])
-  monkeypatch.setattr(actions.toast, "show", lambda *a, **k: None)
   monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
 
   ok, msg, _ = actions.update({"channel": "dev-c3x"})
   assert ok is True and "switched to dev-c3x" in msg
   assert any(args[:3] == ["git", "-C", "/data/openpilot"] for args in runs)
+  assert (tmp_path / "tylerpilot_restart_manager").exists()
 
 
+# --------------------------------------------------------------------------
+# location / trips
+# --------------------------------------------------------------------------
 def test_location_no_fix(monkeypatch):
   monkeypatch.setattr(trips, "recent_positions", lambda n=1: [])
   ok, msg, _ = actions.location({})
@@ -123,17 +109,10 @@ def test_location_with_fix(monkeypatch):
   assert artifact["kind"] == "_location"
 
 
-def test_backup_returns_tarball():
-  ok, msg, artifact = actions.backup({})
-  assert ok is True
-  assert artifact["kind"] == "backup"
-  assert len(base64.b64decode(artifact["data"])) > 0
-
-
+# --------------------------------------------------------------------------
+# diagnostics
+# --------------------------------------------------------------------------
 def test_tar_dereferences_symlinks(tmp_path):
-  import io
-  import tarfile
-
   real = tmp_path / "real"
   real.mkdir()
   (real / "CarParams").write_text("value")
@@ -157,9 +136,6 @@ def test_diagnostics_returns_tarball(monkeypatch):
 
 
 def test_diagnostics_excludes_settings(monkeypatch):
-  import io
-  import tarfile
-
   monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, "output"))
   _, _, artifact = actions.diagnostics({})
   with tarfile.open(fileobj=io.BytesIO(base64.b64decode(artifact["data"])), mode="r:gz") as t:
@@ -168,12 +144,96 @@ def test_diagnostics_excludes_settings(monkeypatch):
   assert not any(n.startswith(("data/params", "data/community")) for n in names)
 
 
+def test_diagnostics_redacts_secrets(monkeypatch):
+  pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecretAAAA\n-----END OPENSSH PRIVATE KEY-----"
+  blob = f'{{"token":"abc123"}} {pem} deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+  monkeypatch.setattr(actions, "_run", lambda *a, **k: (0, blob))
+  _, _, artifact = actions.diagnostics({})
+  with tarfile.open(fileobj=io.BytesIO(base64.b64decode(artifact["data"])), mode="r:gz") as t:
+    text = b"".join(t.extractfile(n).read() for n in t.getnames() if t.extractfile(n))
+  assert b"deadbeefdeadbeef" not in text
+  assert b"BEGIN OPENSSH PRIVATE KEY" not in text
+  assert b"abc123" not in text
+  assert b"<redacted" in text
+
+
+# --------------------------------------------------------------------------
+# backup / restore
+# --------------------------------------------------------------------------
+def test_backup_returns_json_artifact(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "_firmware_version", lambda: "v")
+  fake_params.values["IsMetric"] = True
+  ok, msg, artifact = actions.backup({})
+  assert ok is True and artifact["kind"] == "backup"
+  assert artifact["label"].startswith("settings-") and artifact["label"].endswith(".json")
+  doc = json.loads(base64.b64decode(artifact["data"]))
+  assert doc["format"] == settings_backup.FORMAT and doc["params"] == {"IsMetric": True}
+
+
 def test_restore_requires_artifact_id():
   ok, msg, _ = actions.restore({})
   assert ok is False and msg == "no artifact id"
 
 
-def test_handlers_registry_complete():
-  for name in ("reboot", "poweroff", "restart_manager", "param_get", "param_set",
-               "update", "location", "trips", "diagnostics", "backup", "restore"):
+def test_restore_rejects_non_boolean_dry_run(monkeypatch):
+  ok, msg, _ = actions.restore({"artifact_id": "a", "dry_run": "yes"})
+  assert ok is False and "dry_run" in msg
+
+
+def test_restore_preview_writes_nothing(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "_firmware_version", lambda: "v")
+  raw = settings_backup.build_backup()  # empty params
+  monkeypatch.setattr(client, "download_artifact", lambda *a, **k: raw)
+  ok, result, artifact = actions.restore({"artifact_id": "a"})
+  assert ok is True and artifact is None
+  assert "entries" in json.loads(result)
+  assert fake_params.values == {}  # dry run wrote nothing
+
+
+def test_restore_apply_writes_and_snapshots(fake_params, monkeypatch):
+  monkeypatch.setattr(settings_backup, "_firmware_version", lambda: "v")
+  raw = json.dumps({
+    "format": settings_backup.FORMAT, "version": 1, "created_at": "2026-01-01T00:00:00Z",
+    "source": {"device_id": "d"}, "params": {"Mads": True, "GithubSshKeys": "x"},
+  }).encode()
+  monkeypatch.setattr(client, "download_artifact", lambda *a, **k: raw)
+  ok, result, artifact = actions.restore({"artifact_id": "a", "dry_run": False})
+  assert ok is True
+  out = json.loads(result)
+  assert out == {"applied": 1, "skipped": 1, "unchanged": 0, "reboot_recommended": True}
+  assert fake_params.values["Mads"] is True
+  assert artifact["kind"] == "backup" and artifact["label"].startswith("pre-restore-")
+
+
+def test_restore_apply_refuses_when_onroad(fake_params, monkeypatch):
+  monkeypatch.setattr(actions, "Params", _OnroadParams)
+  raw = json.dumps({"format": settings_backup.FORMAT, "version": 1, "created_at": "z",
+                    "source": {}, "params": {"Mads": True}}).encode()
+  monkeypatch.setattr(client, "download_artifact", lambda *a, **k: raw)
+  ok, msg, _ = actions.restore({"artifact_id": "a", "dry_run": False})
+  assert ok is False and msg == actions.ONROAD_MSG
+
+
+def test_restore_rejects_bad_backup(monkeypatch):
+  monkeypatch.setattr(client, "download_artifact", lambda *a, **k: b"not a backup")
+  ok, msg, _ = actions.restore({"artifact_id": "a"})
+  assert ok is False and "invalid backup" in msg
+
+
+# --------------------------------------------------------------------------
+# legacy cleanup / registry
+# --------------------------------------------------------------------------
+def test_cleanup_legacy_prerestore(tmp_path, monkeypatch):
+  monkeypatch.setattr(config, "STATE_DIR", str(tmp_path))
+  (tmp_path / "prerestore-1.tgz").write_bytes(b"x")
+  (tmp_path / "keep.json").write_text("{}")
+  assert actions.cleanup_legacy_prerestore() == 1
+  assert not (tmp_path / "prerestore-1.tgz").exists()
+  assert (tmp_path / "keep.json").exists()
+
+
+def test_handlers_registry():
+  for name in ("reboot", "poweroff", "update", "location", "trips", "diagnostics", "backup", "restore"):
     assert name in actions.HANDLERS
+  for removed in ("restart_manager", "param_get", "param_set"):
+    assert removed not in actions.HANDLERS

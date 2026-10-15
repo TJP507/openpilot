@@ -9,6 +9,7 @@ trimmed down to its most recent half, so total size stays under the cap.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 
@@ -21,6 +22,31 @@ DIR = os.path.join(Paths.comma_home(), "community") if PC else "/data/community"
 PATH = os.path.join(DIR, "tylerpilot.log")
 
 _LOCK = threading.Lock()
+
+# Secrets that must never leave the device in a log line or a diagnostic bundle.
+# Ordered: structural secrets first, then high-entropy blobs.
+_SECRET_FIELD = "token|password|passwd|secret|api[_-]?key|private[_-]?key|ssh[_-]?keys?|access[_-]?token|refresh[_-]?token"
+_REDACTIONS: list[tuple[re.Pattern, str]] = [
+  (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S),
+   "<redacted private key>"),
+  (re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{10,}"), "<redacted token>"),
+  (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer <redacted>"),
+  (re.compile(r'(?i)"(' + _SECRET_FIELD + r')"\s*:\s*"[^"]*"'), '"<redacted>":"<redacted>"'),
+  (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "<redacted>"),
+  (re.compile(r"(?<![A-Za-z0-9+_\-])[A-Za-z0-9+_\-]{40,}={0,2}(?![A-Za-z0-9+_\-])"), "<redacted>"),
+]
+
+
+def redact(text: str) -> str:
+  """Strip credentials and high-entropy secrets from a string."""
+  for pattern, repl in _REDACTIONS:
+    text = pattern.sub(repl, text)
+  return text
+
+
+def redact_bytes(data: bytes) -> bytes:
+  """redact() for a possibly-binary blob, decoded lossily and re-encoded."""
+  return redact(data.decode("utf-8", "replace")).encode("utf-8")
 
 
 def _trim() -> None:
@@ -44,7 +70,7 @@ def _trim() -> None:
 
 
 def _write(level: str, msg: str) -> None:
-  line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level} {msg}\n"
+  line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level} {redact(msg)}\n"
   try:
     os.makedirs(DIR, exist_ok=True)
     with _LOCK:
