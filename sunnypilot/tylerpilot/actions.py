@@ -1,14 +1,18 @@
 """
 Remote actions for tylerpilotd.
 
-Every handler returns (ok: bool, result: str, artifact: dict | None). The agent
-reports the tuple back to the server via client.job_result(). Handlers are
-defensive: a failure returns a message, never raises out of the loop.
+Handlers return (ok, result, artifact) — and, for actions that must happen only
+after the server has been told (reboot/poweroff), a fourth element: a deferred
+callable the agent runs once the job result is posted. `run()` normalizes every
+handler to that four-tuple. Handlers are defensive: a failure returns a message,
+never raises out of the loop.
 """
 from __future__ import annotations
 
 import base64
+import glob
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -22,6 +26,8 @@ from openpilot.sunnypilot.tylerpilot import config, log, toast
 CHANNELS = ("dev-c3x", "staging-c3x", "release-c3x")
 REPO = "https://github.com/TJP507/openpilot.git"
 
+ONROAD_MSG = "Device is driving — try again when parked"
+
 
 def _run(args, timeout=60, check=False) -> tuple[int, str]:
   try:
@@ -31,81 +37,59 @@ def _run(args, timeout=60, check=False) -> tuple[int, str]:
     return 1, str(e)
 
 
+def _is_onroad() -> bool:
+  """Fail CLOSED: if the onroad state can't be read, assume onroad (refuse)."""
+  try:
+    return bool(Params().get_bool("IsOnroad"))
+  except Exception as e:
+    log.warning(f"could not read IsOnroad, assuming onroad: {e}")
+    return True
+
+
+def _json(obj) -> str:
+  return json.dumps(obj, separators=(",", ":"))
+
+
+def _utc_stamp() -> str:
+  from datetime import UTC, datetime
+  return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+
+
 # --------------------------------------------------------------------------
-# power / manager
+# power
 # --------------------------------------------------------------------------
 def reboot(_payload: dict):
-  toast.show("TylerPilot: rebooting…")
-  time.sleep(1)
-  HARDWARE.reboot()
-  return True, "rebooting", None
+  if _is_onroad():
+    return False, ONROAD_MSG, None
+
+  def _do() -> None:
+    toast.show("TylerPilot: rebooting…")
+    time.sleep(1)
+    HARDWARE.reboot()
+
+  return True, "Rebooting…", None, _do
 
 
 def poweroff(_payload: dict):
-  toast.show("TylerPilot: powering off…")
-  time.sleep(1)
-  HARDWARE.shutdown()
-  return True, "powering off", None
+  if _is_onroad():
+    return False, ONROAD_MSG, None
+
+  def _do() -> None:
+    toast.show("TylerPilot: powering off…")
+    time.sleep(1)
+    HARDWARE.shutdown()
+
+  return True, "Powering off…", None, _do
 
 
-def restart_manager(_payload: dict):
-  toast.show("TylerPilot: restarting manager…")
-  # launch_chffrplus.sh restarts the manager when this flag file is present.
+def _restart_manager() -> None:
+  """Ask launch_chffrplus.sh to restart the manager (its flag-file loop)."""
   flag = os.path.join(config.STATE_DIR, "tylerpilot_restart_manager")
   try:
     open(flag, "w").close()
-  except OSError as e:
-    return False, f"could not set restart flag: {e}", None
+  except OSError:
+    return
   _run(["pkill", "-f", "manager.py"])
-  return True, "manager restart requested", None
-
-
-# --------------------------------------------------------------------------
-# params
-# --------------------------------------------------------------------------
-def _typed(value):
-  """Coerce a stored param value (bytes) to a JSON-friendly type."""
-  if value is None:
-    return None
-  try:
-    s = value.decode("utf-8")
-  except Exception:
-    return base64.b64encode(value).decode()
-  low = s.lower()
-  if low in ("0", "1"):
-    return low == "1"
-  return s
-
-
-def param_get(payload: dict):
-  key = str(payload.get("key") or "")
-  if not key:
-    return False, "no key", None
-  try:
-    val = Params().get(key)
-    return True, val.decode("utf-8", "replace") if isinstance(val, bytes) else str(val), None
-  except Exception as e:
-    return False, str(e), None
-
-
-def param_set(payload: dict):
-  key = str(payload.get("key") or "")
-  if not key:
-    return False, "no key", None
-  value = payload.get("value")
-  try:
-    p = Params()
-    if isinstance(value, bool):
-      p.put_bool(key, value)
-    elif isinstance(value, int):
-      p.put_int(key, value)
-    elif isinstance(value, float):
-      p.put_float(key, value)
-    else:
-      p.put(key, str(value))
-    return True, f"{key} set", None
-  except Exception as e:
-    return False, str(e), None
 
 
 # --------------------------------------------------------------------------
@@ -115,6 +99,8 @@ def update(payload: dict):
   channel = str(payload.get("channel") or "")
   if channel not in CHANNELS:
     return False, f"unknown channel {channel!r}", None
+  if _is_onroad():
+    return False, ONROAD_MSG, None
   d = "/data/openpilot"
   if not os.path.isdir(os.path.join(d, ".git")):
     return False, "no git checkout at /data/openpilot", None
@@ -133,7 +119,7 @@ def update(payload: dict):
   if os.path.isdir(finalized):
     _run(["rsync", "-a", "--delete", "--exclude=.git", f"{d}/", f"{finalized}/"], timeout=600)
 
-  restart_manager({})
+  _restart_manager()
   return True, f"switched to {channel}; restarting manager", None
 
 
@@ -158,7 +144,7 @@ def trips_action(payload: dict):
 
 
 # --------------------------------------------------------------------------
-# diagnostics + settings backup/restore (produce / consume artifacts)
+# diagnostics (support bundle)
 # --------------------------------------------------------------------------
 def _tar(paths: list[str], blobs: dict[str, bytes] | None = None) -> bytes:
   buf = io.BytesIO()
@@ -179,13 +165,10 @@ def _tar(paths: list[str], blobs: dict[str, bytes] | None = None) -> bytes:
   return buf.getvalue()
 
 
-D_INCLUDES = ["/data/params/d", "/data/community"]
-
-
 def diagnostics(_payload: dict):
-  """Support bundle: system state + logs. Deliberately does NOT include the
-  settings that `backup` captures (params + community) — those are restorable
-  and belong to the backup, not to a diagnostic snapshot."""
+  """Support bundle: system state + logs, with every blob run through the
+  redactor. Deliberately does NOT include settings, the link state
+  (tylerpilot.json), tunnel keys, or the webdashcam config."""
   blobs: dict[str, bytes] = {}
   cmds = {
     "diag/dmesg.txt": ["dmesg"],
@@ -199,7 +182,7 @@ def diagnostics(_payload: dict):
   }
   for name, args in cmds.items():
     _, out = _run(args, timeout=30)
-    blobs[name] = out.encode("utf-8", "replace")
+    blobs[name] = log.redact_bytes(out.encode("utf-8", "replace"))
 
   # newest swaglog tail
   try:
@@ -209,14 +192,14 @@ def diagnostics(_payload: dict):
     if logs:
       with open(logs[-1], "rb") as f:
         data = f.read()
-      blobs["diag/swaglog_tail.txt"] = data[-200_000:]
+      blobs["diag/swaglog_tail.txt"] = log.redact_bytes(data[-200_000:])
   except OSError:
     pass
 
   # TylerPilot agent log tail
   try:
     with open("/data/community/tylerpilot.log", "rb") as f:
-      blobs["diag/tylerpilot.log"] = f.read()[-200_000:]
+      blobs["diag/tylerpilot.log"] = log.redact_bytes(f.read()[-200_000:])
   except OSError:
     pass
 
@@ -224,42 +207,72 @@ def diagnostics(_payload: dict):
   return True, f"diagnostic bundle ({len(data)} bytes)", {"kind": "diagnostics", "data": base64.b64encode(data).decode()}
 
 
+# --------------------------------------------------------------------------
+# settings backup / restore (JSON artifacts)
+# --------------------------------------------------------------------------
 def backup(_payload: dict):
-  data = _tar(D_INCLUDES)
-  return True, f"backup ({len(data)} bytes)", {"kind": "backup", "data": base64.b64encode(data).decode()}
+  from openpilot.sunnypilot.tylerpilot import settings_backup
+  data = settings_backup.build_backup()
+  name = str(config.get("name") or "device")
+  label = f"settings-{name}-{_utc_stamp()}.json"
+  return True, f"backup ({len(data)} bytes)", {"kind": "backup", "label": label, "data": base64.b64encode(data).decode()}
 
 
 def restore(payload: dict):
-  """Restore a settings backup uploaded earlier (identified by artifact_id)."""
-  from openpilot.sunnypilot.tylerpilot import client
+  """Preview (dry_run, the default) or apply a settings backup artifact."""
+  from openpilot.sunnypilot.tylerpilot import client, settings_backup
   aid = str(payload.get("artifact_id") or "")
   if not aid:
     return False, "no artifact id", None
+  dry_run = payload.get("dry_run", True)
+  if not isinstance(dry_run, bool):
+    return False, "dry_run must be a boolean", None
+
   raw = client.download_artifact(config.get("host"), int(config.get("port")), config.get("token"),
                                  config.get("fingerprint"), aid)
-  # Safety: snapshot current state first.
-  pre = _tar(D_INCLUDES)
-  pre_path = os.path.join(config.STATE_DIR, f"prerestore-{int(time.time())}.tgz")  # noqa: TID251 — filename timestamp
   try:
-    with open(pre_path, "wb") as f:
-      f.write(pre)
-  except OSError:
-    pass
-  try:
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as t:
-      t.extractall("/")
-  except Exception as e:
-    return False, f"restore failed: {e}", None
-  restart_manager({})
-  return True, f"restored settings (prev saved to {os.path.basename(pre_path)})", None
+    doc = settings_backup.parse_backup(raw)
+  except settings_backup.BackupError as e:
+    return False, f"invalid backup: {e}", None
+
+  entries = settings_backup.diff(doc)
+  if dry_run:
+    preview = {"source": doc["source"], "created_at": doc["created_at"], "entries": entries}
+    return True, _json(preview), None
+
+  if _is_onroad():
+    return False, ONROAD_MSG, None
+
+  # Snapshot the current settings first — returned as an artifact, never
+  # written to the device.
+  pre = settings_backup.build_backup()
+  artifact = {"kind": "backup", "label": f"pre-restore-{_utc_stamp()}.json",
+              "data": base64.b64encode(pre).decode()}
+  counts = settings_backup.apply(doc)
+  result = dict(counts)
+  # Params are read at start-up by many processes; recommend a reboot whenever
+  # anything changed rather than tracking which keys live-reload.
+  result["reboot_recommended"] = counts["applied"] > 0
+  return True, _json(result), artifact
+
+
+def cleanup_legacy_prerestore() -> int:
+  """One-time cleanup of pre-restore tarballs written by the old restore flow."""
+  removed = 0
+  for path in glob.glob(os.path.join(config.STATE_DIR, "prerestore-*.tgz")):
+    try:
+      os.remove(path)
+      removed += 1
+    except OSError:
+      pass
+  if removed:
+    log.info(f"removed {removed} legacy pre-restore snapshot(s)")
+  return removed
 
 
 HANDLERS = {
   "reboot": reboot,
   "poweroff": poweroff,
-  "restart_manager": restart_manager,
-  "param_get": param_get,
-  "param_set": param_set,
   "update": update,
   "location": location,
   "trips": trips_action,
@@ -270,11 +283,16 @@ HANDLERS = {
 
 
 def run(kind: str, payload: dict):
+  """Run a handler and normalize its return to (ok, result, artifact, deferred)."""
   fn = HANDLERS.get(kind)
   if not fn:
-    return False, f"unknown action {kind!r}", None
+    return False, f"unknown action {kind!r}", None, None
   try:
-    return fn(payload or {})
+    res = fn(payload or {})
   except Exception as e:
     log.exception(f"action {kind} failed", e)
-    return False, f"{type(e).__name__}: {e}", None
+    return False, f"{type(e).__name__}: {e}", None, None
+  if len(res) == 4:
+    return res
+  ok, result, artifact = res
+  return ok, result, artifact, None

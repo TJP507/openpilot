@@ -11,7 +11,10 @@ Links a comma 3X to a TylerPilot server for stats and remote SSH.
   authorized by the pairing code) and verified on every later connection.
 - `agent.py` — background process `tylerpilotd`: heartbeat + 25s long-poll for
   commands. Idles when not linked. Heartbeat is 15s on every link type.
-- `log.py` — TylerPilot-only log, capped at **50 MB** (see Logs below).
+- `log.py` — TylerPilot-only log, capped at **50 MB** (see Logs below), and the
+  secret **redactor** used by both the log and the diagnostics bundle.
+- `settings_backup.py` — the settings allow/deny lists and the JSON backup
+  build/parse/diff/apply logic.
 - `../selfdrive/ui/.../settings/tylerpilot.py` — the Settings panel
   (**Settings → Developer → TylerPilot Cloud**).
 
@@ -60,18 +63,63 @@ it. No separate SSH port or reverse `ssh -R` is needed.
 The server can queue jobs that the agent picks up on the same long-poll (as
 `{"type":"job"}`) and runs via `actions.py`:
 
-- **Power / manager** — `reboot`, `poweroff`, `restart_manager`.
-- **Params** — `param_get`, `param_set`.
-- **Update** — `update` (switch the git checkout to a TylerPilot channel).
+- **Power** — `reboot`, `poweroff`. These report back to the server **before**
+  acting: the handler returns a deferred callable that the agent runs only after
+  the job result is posted.
+- **Update** — `update` (switch the git checkout to a TylerPilot channel, then
+  restart the manager via `launch_chffrplus.sh`'s flag-file loop).
 - **Telemetry** — `location`, `trips` (parsed locally; only the compact summary
   is uploaded, never raw logs).
-- **Settings** — `backup` and `restore`. `backup` tars `/data/params/d` +
-  `/data/community` and uploads it as an artifact; `restore` pulls a previously
-  uploaded artifact back down (via `GET /api/v1/device/artifact?id=…`), snapshots
-  the current state first, then extracts it. `diagnostics` produces a support
-  bundle (dmesg/journal/network/ps/… + a swaglog tail).
+- **Settings** — `backup`, `restore` (see below).
+- **Diagnostics** — `diagnostics` produces a support bundle (dmesg/journal/
+  network/ps/… + a swaglog tail). Every blob passes through the redactor in
+  `log.py`, so bearer tokens, keys, and other secrets never leave the device.
 
-Each handler returns `(ok, result, artifact?)`; the agent reports back with
-`POST /api/v1/device/job_result`, and the server stores any artifact for the
-web UI to download.
+`reboot`, `poweroff`, `update`, and a `restore` **apply** refuse to run while
+the device is driving ("Device is driving — try again when parked").
+
+Each handler returns `(ok, result, artifact?)` (plus the optional deferred
+callable above); the agent reports back with `POST /api/v1/device/job_result`,
+and the server stores any artifact for the web UI.
+
+## Settings backup & restore
+
+A backup is a small UTF-8 **JSON** document (`settings_backup.py`), not a
+tarball — restore only ever writes params through the Params API and never
+extracts files:
+
+```json
+{"format": "tylerpilot-settings", "version": 1,
+ "created_at": "<UTC ISO-8601 with Z>",
+ "source": {"device_id": "...", "dongle_id": "...", "name": "...",
+            "firmware_version": "...", "branch": "..."},
+ "params": {"Mads": true, "GsmApn": "internet", "CameraOffset": 0.5}}
+```
+
+- **Allowlist** — only an explicit set of `BACKUP`-flagged user settings is
+  captured (categories: Driving, Lateral, Longitudinal, Display, Recording,
+  Vehicle, Network). Values are JSON-native and match each param's declared
+  type.
+- **Denylist** — `BACKUP`-flagged keys that are credentials, identity,
+  security-sensitive, per-device calibration/state, caches, or one-shot
+  migration markers are refused (e.g. `GithubSshKeys`, `SecOCKey`,
+  `CarPlatformBundle`, `LiveDelay`, `ModelManager_ModelsCache`). Tokens, keys,
+  logs, and anything under `/data/community` are never included.
+- **Safety-gated toggles** — enabling a toggle that shows a safety dialog on the
+  device (Experimental Mode, the Toyota stop-and-go/enforce-stock toggles) is
+  skipped on restore so the notice isn't bypassed; Experimental Mode is allowed
+  once `ExperimentalModeConfirmed` is already true on this device.
+- **Restore is two-phase**: a **preview** (`dry_run`, the default) downloads and
+  validates the artifact and returns a per-key diff (change / same / skipped,
+  with a reason) without writing; an **apply** (`dry_run: false`) snapshots the
+  current settings into a `pre-restore-<UTC>.json` artifact, writes only the
+  "change" entries (blocking until each is on disk), and reports `{applied,
+  skipped, unchanged, failed: [{key, error}], reboot_recommended}`. A reboot is
+  recommended whenever anything changed.
+- Cross-device restore is allowed; the server warns using the backup's `source`.
+
+The allow/deny lists and declared types are asserted against
+`common/params_keys.h` by the tests, so an upstream change to a key or its
+`BACKUP` flag fails the suite.
+
 

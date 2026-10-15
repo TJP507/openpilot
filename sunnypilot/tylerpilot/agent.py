@@ -143,7 +143,7 @@ def _run_job(cmd: dict) -> None:
   payload = cmd.get("payload") or {}
   log.info(f"job {kind} ({job_id})")
 
-  ok, result, extra = actions.run(kind, payload)
+  ok, result, extra, deferred = actions.run(kind, payload)
 
   host, port = config.get("host"), int(config.get("port"))
   token, pin = config.get("token"), config.get("fingerprint")
@@ -157,6 +157,14 @@ def _run_job(cmd: dict) -> None:
     client.job_result(host, port, token, pin, job_id, ok, result, extra)
   except Exception as e:
     log.warning(f"job result report failed: {e}")
+    return
+
+  # Side-effecting actions (reboot/poweroff) report back first, then act.
+  if deferred is not None:
+    try:
+      deferred()
+    except Exception as e:
+      log.warning(f"deferred action {kind} failed: {e}")
 
 
 def _ensure_server_key() -> None:
@@ -168,6 +176,7 @@ def _ensure_server_key() -> None:
 
 def main() -> None:
   log.info("agent starting")
+  actions.cleanup_legacy_prerestore()
   last_heartbeat = 0.0
   while True:
     try:
