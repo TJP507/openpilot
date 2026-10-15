@@ -5,6 +5,7 @@ records that keep archives larger than 4 GiB valid.
 from __future__ import annotations
 
 import asyncio
+import os
 import struct
 import zipfile
 
@@ -120,16 +121,51 @@ async def _zeros(size: int):
     remaining -= n
 
 
+def _central_offsets(path) -> list[int]:
+  """Read the central directory out of a finished archive and return each
+  entry's 64-bit relative-header-offset."""
+  size = os.path.getsize(path)
+  tail_len = min(1 << 16, size)
+  with open(path, "rb") as fh:
+    fh.seek(size - tail_len)
+    tail = fh.read()
+    i = tail.rfind(b"PK\x06\x06")
+    assert i >= 0, "no ZIP64 end-of-central-directory record"
+    central_offset = struct.unpack_from("<Q", tail, i + 48)[0]
+    central_size = struct.unpack_from("<Q", tail, i + 40)[0]
+    fh.seek(central_offset)
+    cd = fh.read(central_size)
+
+  offsets = []
+  off = 0
+  while off < len(cd):
+    assert cd[off:off + 4] == b"PK\x01\x02", f"bad central signature at {off}"
+    size32 = struct.unpack_from("<I", cd, off + 24)[0]
+    offset32 = struct.unpack_from("<I", cd, off + 42)[0]
+    name_len = struct.unpack_from("<H", cd, off + 28)[0]
+    extra_len = struct.unpack_from("<H", cd, off + 30)[0]
+    extra = cd[off + 46 + name_len:off + 46 + name_len + extra_len]
+    off64 = offset32
+    if offset32 == _U32_MAX:
+      p = 4 + (16 if size32 == _U32_MAX else 0)
+      off64 = struct.unpack_from("<Q", extra, p)[0]
+    offsets.append(off64)
+    off += 46 + name_len + extra_len
+  return offsets
+
+
 @pytest.mark.slow
 def test_zip64_end_to_end_over_4gib(tmp_path):
-  # Three ~2.2 GiB entries: each is under the 4 GiB per-entry limit, but the
-  # third sits past the 4 GiB archive offset (the reported bug).
-  big = 2_200_000_000
-  sizes = [big, big, 1000]
+  # Two ~2.2 GB filler entries, then two small entries. Both small entries start
+  # past the 4 GiB (0xFFFFFFFF) offset — the reported bug — so their
+  # central-directory offsets must be carried in a ZIP64 extra field.
+  filler = 2_200_000_000
+  sizes = [filler, filler, 1000, 1000]
   names = [
     "2026-10-14/00-00-00_front.mp4",
     "2026-10-14/00-01-00_front.mp4",
     "2026-10-14/00-02-00_front.mp4",
+    "2026-10-14/00-03-00_front.mp4",
   ]
   path = tmp_path / "big.zip"
   with open(path, "wb") as fh:
@@ -143,6 +179,13 @@ def test_zip64_end_to_end_over_4gib(tmp_path):
     asyncio.run(run())
 
   assert path.stat().st_size > 1 << 32
+
+  offsets = _central_offsets(path)
+  assert len(offsets) == len(names)
+  past = [o for o in offsets if o > _U32_MAX]
+  assert max(offsets) > _U32_MAX, f"max offset {max(offsets)} not past 4 GiB"
+  assert len(past) >= 2, f"only {len(past)} entries start past 4 GiB: {offsets}"
+
   with zipfile.ZipFile(path) as zf:
     assert zf.namelist() == names
     assert zf.testzip() is None  # verifies every entry's CRC
