@@ -202,7 +202,9 @@ def test_diff_toyota_toggles_require_on_device_enable(fake_params, monkeypatch):
   by_key = {e["key"]: e for e in settings_backup.diff(
     _doc({"ToyotaStopAndGoHack": True, "ToyotaEnforceStockLongitudinal": True}))}
   assert by_key["ToyotaStopAndGoHack"]["status"] == "skipped"
+  assert by_key["ToyotaStopAndGoHack"]["reason"] == settings_backup.CONFIRM_REQUIRED["ToyotaStopAndGoHack"]
   assert by_key["ToyotaEnforceStockLongitudinal"]["status"] == "skipped"
+  assert by_key["ToyotaEnforceStockLongitudinal"]["reason"] == settings_backup.CONFIRM_REQUIRED["ToyotaEnforceStockLongitudinal"]
 
 
 def test_build_backup_uses_registry_defaults(fake_params, monkeypatch):

@@ -150,8 +150,8 @@ DENYLIST: dict[str, str] = {
 # this device).
 CONFIRM_REQUIRED: dict[str, str] = {
   "ExperimentalMode": "Turn on Experimental Mode once on the device to accept its safety notice",
-  "ToyotaEnforceStockLongitudinal": "Enable on the device to accept its safety notice",
-  "ToyotaStopAndGoHack": "Enable on the device to accept its safety notice",
+  "ToyotaEnforceStockLongitudinal": "Turn on Toyota stock longitudinal once on the device to accept its safety notice",
+  "ToyotaStopAndGoHack": "Turn on Toyota stop-and-go hack once on the device to accept its safety notice",
 }
 
 # Declared type of every ALLOWLIST key, mirroring common/params_keys.h. The
