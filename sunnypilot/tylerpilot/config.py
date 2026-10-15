@@ -48,6 +48,7 @@ _DEFAULTS: dict = {
   "server_name": "",
   "server_ssh_key": "",
   "linked": False,
+  "revoked": False,
   "last_error": "",
 }
 
@@ -94,16 +95,27 @@ def is_linked() -> bool:
   return bool(s["linked"] and s["token"] and s["device_id"])
 
 
+def is_revoked() -> bool:
+  """True when the server revoked this device's key (it must be re-linked)."""
+  return bool(load().get("revoked"))
+
+
 def set_link(device_id: str, token: str, fingerprint: str, server_name: str, name: str,
              server_ssh_key: str = "") -> dict:
   return set_values(device_id=device_id, token=token, fingerprint=fingerprint,
                     server_name=server_name, name=name, server_ssh_key=server_ssh_key,
-                    linked=True, last_error="")
+                    linked=True, revoked=False, last_error="")
 
 
 def clear_link() -> dict:
   return set_values(device_id="", token="", fingerprint="", server_name="", server_ssh_key="",
-                    linked=False, last_error="")
+                    linked=False, revoked=False, last_error="")
+
+
+def mark_revoked(reason: str = "") -> dict:
+  """The server revoked this device's key: drop the token but keep host/port so
+  the user can re-link. Distinct from clear_link (an intentional unlink)."""
+  return set_values(device_id="", token="", linked=False, revoked=True, last_error=reason[:300])
 
 
 def set_error(msg: str) -> None:

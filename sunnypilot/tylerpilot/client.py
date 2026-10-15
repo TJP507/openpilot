@@ -29,15 +29,53 @@ class LinkError(Exception):
   """Server rejected the request (non-200)."""
 
 
+class AuthError(Exception):
+  """The server rejected our credentials (HTTP 401).
+
+  `code` is the server's error code when it sent our JSON envelope (e.g.
+  "unauthenticated"); it is "" for a foreign 401 (e.g. a proxy's Basic auth),
+  which must NOT be treated as a revocation.
+  """
+
+  def __init__(self, message: str, code: str = "") -> None:
+    super().__init__(message)
+    self.code = code
+
+
 def _fingerprint(der: bytes) -> str:
   return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
 
 
 def _err(data: bytes) -> str:
   try:
-    return json.loads(data).get("error", data.decode(errors="replace"))
+    err = json.loads(data).get("error")
+    if isinstance(err, dict):
+      return str(err.get("message") or err.get("code") or err)
+    if err is not None:
+      return str(err)
+    return data.decode(errors="replace")
   except Exception:
     return data.decode(errors="replace")
+
+
+def _error_code(data: bytes) -> str:
+  """The server's error code from our JSON envelope ("" if it isn't ours)."""
+  try:
+    err = json.loads(data).get("error")
+    if isinstance(err, dict):
+      return str(err.get("code") or "")
+    if isinstance(err, str):
+      return err
+  except Exception:
+    pass
+  return ""
+
+
+def normalize_pairing_code(text: str) -> str:
+  """Strip everything but digits, so a code entered as XXXX-XXXX-XXXX or with
+  spaces is accepted. Returns "" when it is not a 12-digit code."""
+  digits = "".join(ch for ch in (text or "") if ch.isdigit())
+  return digits if len(digits) == 12 else ""
 
 
 def _request(host: str, port: int, method: str, path: str, headers: dict | None = None,
@@ -62,15 +100,32 @@ def _request(host: str, port: int, method: str, path: str, headers: dict | None 
 
 # ---- tunnel key (device -> server, used for ssh -R) ----
 
-def ensure_tunnel_key() -> str:
-  if not (os.path.exists(config.TUNNEL_KEY_PATH) and os.path.exists(config.TUNNEL_PUB_PATH)):
-    subprocess.run(
-      ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", config.TUNNEL_KEY_PATH],
-      check=True, capture_output=True,
-    )
-    os.chmod(config.TUNNEL_KEY_PATH, 0o600)
-  with open(config.TUNNEL_PUB_PATH) as f:
+def _generate_tunnel_key(path: str) -> str:
+  subprocess.run(
+    ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "tylerpilot-device", "-f", path],
+    check=True, capture_output=True,
+  )
+  os.chmod(path, 0o600)
+  with open(path + ".pub") as f:
     return f.read().strip()
+
+
+def rotate_tunnel_key() -> str:
+  """Generate a fresh key pair, discarding any existing one. Called on every
+  (re)link so a device never reuses a key the server has already seen.
+
+  The new pair is generated to temp paths and atomically renamed into place, so
+  a failed ssh-keygen never leaves the device without a usable key."""
+  tmp = config.TUNNEL_KEY_PATH + ".new"
+  for path in (tmp, tmp + ".pub"):
+    try:
+      os.remove(path)
+    except FileNotFoundError:
+      pass
+  pub = _generate_tunnel_key(tmp)
+  os.replace(tmp, config.TUNNEL_KEY_PATH)
+  os.replace(tmp + ".pub", config.TUNNEL_PUB_PATH)
+  return pub
 
 
 def _authorized_keys_paths() -> list[str]:
@@ -153,6 +208,8 @@ def heartbeat(host: str, port: int, token: str, pin: str, stats: dict) -> dict:
     {"content-type": "application/json", "authorization": f"Bearer {token}"},
     json.dumps({"version": stats.get("version", ""), "stats": stats}), pin=pin, timeout=15.0,
   )
+  if status == 401:
+    raise AuthError(_err(data), _error_code(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)
@@ -163,6 +220,8 @@ def poll(host: str, port: int, token: str, pin: str, timeout: float = 40.0) -> d
     host, port, "GET", "/api/v1/device/poll",
     {"authorization": f"Bearer {token}"}, None, pin=pin, timeout=timeout,
   )
+  if status == 401:
+    raise AuthError(_err(data), _error_code(data))
   if status != 200:
     raise LinkError(_err(data))
   return json.loads(data)

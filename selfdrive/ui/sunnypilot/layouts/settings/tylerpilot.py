@@ -82,7 +82,7 @@ class TylerPilotPanel(NavWidget):
     self._link = button_item_sp(
       lambda: tr("Link Device"),
       lambda: tr("LINK"),
-      lambda: tr("Enter the 12-digit pairing code from the TylerPilot web app. The code is valid for 10 minutes."),
+      lambda: tr("Enter the pairing code from the TylerPilot web app, e.g. XXXX-XXXX-XXXX. The code is valid for 10 minutes."),
       callback=self._on_link,
     )
     self._unlink = button_item_sp(
@@ -122,6 +122,8 @@ class TylerPilotPanel(NavWidget):
 
   @staticmethod
   def _status_text() -> str:
+    if tp.is_revoked():
+      return tr("Disconnected from TylerPilot Cloud — enter a new code to re-link")
     if not tp.is_linked():
       return tr("Not linked")
     err = tp.get("last_error")
@@ -136,13 +138,14 @@ class TylerPilotPanel(NavWidget):
     def _cb(result: int, text: str):
       if result != DialogResult.CONFIRM:
         return
-      code = "".join(ch for ch in text if ch.isdigit())
-      if len(code) != 12:
+      from openpilot.sunnypilot.tylerpilot import client
+      code = client.normalize_pairing_code(text)
+      if not code:
         tp.set_error(tr("Pairing code must be 12 digits"))
         return
       threading.Thread(target=self._do_link, args=(code,), daemon=True).start()
 
-    InputDialogSP(tr("Pairing Code"), tr("Enter the 12-digit code from the web app"),
+    InputDialogSP(tr("Pairing Code"), tr("Enter the code from the web app (XXXX-XXXX-XXXX)"),
                   callback=_cb, min_text_size=12).show()
 
   @staticmethod
@@ -150,7 +153,7 @@ class TylerPilotPanel(NavWidget):
     from openpilot.sunnypilot.tylerpilot import client
     host, port = tp.get("host"), int(tp.get("port"))
     try:
-      pubkey = client.ensure_tunnel_key()
+      pubkey = client.rotate_tunnel_key()
       result = client.register(host, port, code, _device_name(), _device_uid(),
                                get_version(), _dongle_id(), pubkey)
       srv_key = result.get("ssh_pubkey", "")

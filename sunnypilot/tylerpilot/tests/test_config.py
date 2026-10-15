@@ -45,6 +45,28 @@ def test_set_error_truncates(state):
   assert len(config.load()["last_error"]) == 300
 
 
+def test_mark_revoked_drops_token_but_keeps_server(state):
+  config.set_link("dev1", "tok", "fp", "srv", "name")
+  config.mark_revoked("disconnected")
+  s = config.load()
+  assert s["revoked"] is True
+  assert s["linked"] is False
+  assert s["token"] == "" and s["device_id"] == ""
+  assert s["host"] == config.DEFAULT_HOST
+  assert config.is_revoked() is True
+  assert config.is_linked() is False
+
+
+def test_set_link_and_clear_link_reset_revoked(state):
+  config.mark_revoked("x")
+  assert config.is_revoked() is True
+  config.set_link("dev1", "tok", "fp", "srv", "name")
+  assert config.is_revoked() is False
+  config.mark_revoked("x")
+  config.clear_link()
+  assert config.is_revoked() is False
+
+
 def test_set_server(state):
   config.set_server("example.com", 1234)
   s = config.load()
