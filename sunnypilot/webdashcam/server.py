@@ -24,11 +24,9 @@ import os
 import secrets
 import socket
 import ssl
-import struct
 import subprocess
 import threading
 import time
-import zlib
 
 import psutil
 from aiohttp import web
@@ -36,6 +34,7 @@ from aiohttp import web
 import cereal.messaging as messaging
 
 from openpilot.sunnypilot.webdashcam import config, library, timeutil
+from openpilot.sunnypilot.webdashcam.zipstream import ZipStream
 
 HOST = "0.0.0.0"
 CHUNK = 1 << 20  # 1 MiB
@@ -219,15 +218,18 @@ function renderClips(){
   $("#crumb").firstChild.onclick=loadDates;
   const el=$("#list");el.innerHTML="";
   const cams=camList();
+  const unknown=state.date==="unknown";
   const clips=state.clips.filter(c=>c.cameras.some(x=>cams.includes(x.slug)));
   if(!clips.length){el.innerHTML='<div class="empty">No clips for this camera</div>';}
   for(const c of clips){
     const row=document.createElement("div");row.className="row";
     const total=c.cameras.filter(x=>cams.includes(x.slug)).reduce((a,x)=>a+x.size,0);
     const on=state.sel.has(c.seg);
+    const title=unknown?"Time unknown":c.time+" UTC";
+    const sub=unknown?"Segment "+c.seg:"segment "+c.seg.split("--").pop();
     row.innerHTML=`<div class="check ${on?"on":""}"></div>
-      <div class="grow"><div class="title">${c.time} UTC</div>
-      <div class="meta">segment ${c.seg.split("--").pop()} \\u2022 ${fmt(total)}</div></div>
+      <div class="grow"><div class="title">${title}</div>
+      <div class="meta">${sub} \\u2022 ${fmt(total)}</div></div>
       <div class="acts"></div>`;
     const acts=row.querySelector(".acts");
     for(const cam of cams){
@@ -374,7 +376,10 @@ async def handle_clips(request: web.Request) -> web.Response:
     info = library.segment_info(name, seg_dir, mtime)
     if info["cameras"]:
       clips.append(info)
-  clips.sort(key=lambda c: c["mtime"], reverse=True)
+  if date == timeutil.UNKNOWN_DATE:
+    clips.sort(key=lambda c: c["seg"])
+  else:
+    clips.sort(key=lambda c: c["mtime"], reverse=True)
   return web.json_response({"date": date, "clips": clips})
 
 
@@ -420,9 +425,12 @@ async def handle_zip(request: web.Request) -> web.StreamResponse:
     for cam in cams:
       path = library.camera_path(name, cam)
       if path is not None:
-        folder = library.date_of(mtime)
-        stamp = timeutil.time_text(mtime).replace(":", "-")
-        entries.append((f"{folder}/{stamp}_{cam}.mp4", mtime, path))
+        if library.date_of(mtime) == timeutil.UNKNOWN_DATE:
+          archive_name = f"{timeutil.UNKNOWN_DATE}/{name}_{cam}.mp4"
+        else:
+          stamp = timeutil.time_text(mtime).replace(":", "-")
+          archive_name = f"{library.date_of(mtime)}/{stamp}_{cam}.mp4"
+        entries.append((archive_name, mtime, path))
 
   if not entries:
     raise web.HTTPNotFound(text="nothing to download")
@@ -437,7 +445,7 @@ async def handle_zip(request: web.Request) -> web.StreamResponse:
   await response.prepare(request)
   _ACTIVE_STREAMS += 1
   try:
-    zipper = _ZipStream(response)
+    zipper = ZipStream(response)
     for name, mtime, path in entries:
       await zipper.add(name, mtime, _mp4_chunks(path))
     await zipper.finish()
@@ -466,64 +474,6 @@ async def _mp4_chunks(path: str):
       except ProcessLookupError:
         pass
     await proc.wait()
-
-
-class _ZipStream:
-  """Minimal streaming ZIP writer (store method, data descriptors).
-
-  The archive is written straight to the client as it is produced, so a large
-  selection never has to be buffered in memory or on disk. Sizes and CRCs are
-  unknown up front, so each entry uses a data descriptor; a ZIP64 end record is
-  emitted when the archive as a whole exceeds the 4 GiB classic limit.
-  """
-
-  def __init__(self, response: web.StreamResponse):
-    self._response = response
-    self._entries: list = []
-    self._offset = 0
-
-  async def _write(self, data: bytes) -> None:
-    await self._response.write(data)
-    self._offset += len(data)
-
-  async def add(self, name: str, mtime: float, chunks) -> None:
-    raw_name = name.encode("utf-8")
-    dos_time, dos_date = timeutil.dos_datetime(mtime)
-    offset = self._offset
-    header = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0x0008, 0, dos_time, dos_date,
-                         0, 0, 0, len(raw_name), 0)
-    await self._write(header + raw_name)
-
-    crc = 0
-    size = 0
-    async for chunk in chunks:
-      crc = zlib.crc32(chunk, crc)
-      size += len(chunk)
-      await self._write(chunk)
-
-    crc &= 0xFFFFFFFF
-    await self._write(struct.pack("<IIII", 0x08074B50, crc, size, size))
-    self._entries.append((raw_name, crc, size, offset, dos_time, dos_date))
-
-  async def finish(self) -> None:
-    central_offset = self._offset
-    for raw_name, crc, size, offset, dos_time, dos_date in self._entries:
-      record = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0x0008, 0, dos_time, dos_date,
-                           crc, size, size, len(raw_name), 0, 0, 0, 0, 0, offset)
-      await self._write(record + raw_name)
-
-    central_size = self._offset - central_offset
-    count = len(self._entries)
-    if central_offset > 0xFFFFFFFF or central_size > 0xFFFFFFFF or count > 0xFFFF:
-      zip64_offset = self._offset
-      await self._write(struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0,
-                                    count, count, central_size, central_offset))
-      await self._write(struct.pack("<IIQI", 0x07064B50, 0, zip64_offset, 1))
-      await self._write(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 0xFFFF, 0xFFFF,
-                                    0xFFFFFFFF, 0xFFFFFFFF, 0))
-    else:
-      await self._write(struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, count, count,
-                                    central_size, central_offset, 0))
 
 
 _CERT_SIGNATURE = ""
