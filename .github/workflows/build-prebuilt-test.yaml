@@ -1,0 +1,98 @@
+name: build-prebuilt-test
+
+# Proof build: compile the `dev-c3x` source tree in the AGNOS build image on a
+# GitHub-hosted arm64 runner and upload the result. NO strip / publish yet —
+# this only proves the AGNOS-userland image builds dev-c3x and records what
+# scons produces (including panda/board/obj).
+#
+# workflow_dispatch only, for now.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Build image reference (pin by digest for reproducibility)'
+        required: false
+        default: 'ghcr.io/tjp507/openpilot-agnos-build:18.4'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: build-prebuilt-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build dev-c3x in AGNOS image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - name: Checkout dev-c3x
+        uses: actions/checkout@v4
+        with:
+          ref: dev-c3x
+          fetch-depth: 1
+
+      - name: Overlay ci/agnos from the dispatched ref
+        # The build script lives in this PR; the source tree under test is dev-c3x.
+        run: |
+          git fetch --depth 1 origin "${GITHUB_REF_NAME}"
+          git checkout FETCH_HEAD -- ci/agnos
+          ls -la ci/agnos
+
+      - name: Pull git LFS content
+        run: git lfs pull || true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull build image
+        run: docker pull --platform linux/arm64 "${{ inputs.image }}"
+
+      - name: Restore scons cache
+        uses: actions/cache@v4
+        with:
+          path: scons_cache
+          key: scons-cache-${{ github.sha }}
+          restore-keys: |
+            scons-cache-
+
+      - name: Build prebuilt tree (inside AGNOS image)
+        run: |
+          mkdir -p scons_cache
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$GITHUB_WORKSPACE/scons_cache:/scons_cache" \
+            -e REPO_DIR=/work \
+            -e BUILD_DIR=/work/build \
+            -e SCONS_CACHE=/scons_cache \
+            "${{ inputs.image }}" \
+            bash /work/ci/agnos/build-prebuilt.sh
+
+      - name: Fix ownership for cache + artifact upload
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build scons_cache 2>/dev/null || true
+
+      - name: Record panda/board/obj
+        if: always()
+        run: |
+          echo "### panda/board/obj" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la build/panda/board/obj 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload built tree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-test-${{ github.run_id }}
+          path: build/
+          compression-level: 0
+          if-no-files-found: warn

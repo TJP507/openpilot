@@ -1,0 +1,97 @@
+name: agnos-build-image
+
+# Builds and pushes the comma 3X (AGNOS) build userland image used to compile
+# the prebuilt tree. Runs on GitHub-hosted arm64 (free for this public repo),
+# so no self-hosted comma runner is needed.
+#
+# See ci/agnos/README.md for the pinning rationale and the extraction steps.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ci/agnos/**'
+      - '.github/workflows/agnos-build-image.yaml'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: agnos-build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AGNOS_VERSION: "18.4"
+  BASE_IMAGE: ghcr.io/tjp507/openpilot-agnos-base
+  IMAGE: ghcr.io/tjp507/openpilot-agnos-build
+
+jobs:
+  build:
+    name: build + push image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs xz-utils
+
+      - name: Fetch + verify + extract AGNOS rootfs
+        run: sudo -E "$GITHUB_WORKSPACE/ci/agnos/fetch-agnos-rootfs.sh" "$RUNNER_TEMP/agnos"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import AGNOS rootfs as an arm64 base image
+        run: |
+          sudo tar -C "$RUNNER_TEMP/agnos/rootfs" --numeric-owner -cf - . \
+            | docker import --platform linux/arm64 - "${BASE_IMAGE}:${AGNOS_VERSION}"
+          docker image inspect "${BASE_IMAGE}:${AGNOS_VERSION}" \
+            --format 'imported base: {{.Architecture}} {{.Os}}'
+
+      - name: Free the extracted rootfs
+        run: sudo rm -rf "$RUNNER_TEMP/agnos"
+
+      - name: Build agnos-build image
+        run: |
+          docker build --platform linux/arm64 \
+            --build-arg AGNOS_BASE="${BASE_IMAGE}:${AGNOS_VERSION}" \
+            -f ci/agnos/Dockerfile \
+            -t "${IMAGE}:${AGNOS_VERSION}" \
+            ci/agnos
+
+      - name: Smoke test
+        run: |
+          docker run --rm --platform linux/arm64 "${IMAGE}:${AGNOS_VERSION}" bash -c '
+            set -e
+            source /etc/profile
+            echo "uname -m: $(uname -m)"
+            test -f /TICI && echo "/TICI OK"
+            clang --version | head -1
+            scons --version | head -1
+            uv --version
+            python3 -c "import numpy, acados, capnproto; print(\"AGNOS venv deps OK numpy=\"+numpy.__version__)"
+          '
+
+      - name: Push images
+        run: |
+          docker push "${BASE_IMAGE}:${AGNOS_VERSION}"
+          docker push "${IMAGE}:${AGNOS_VERSION}"
+
+      - name: Report digest
+        run: |
+          echo "### agnos-build image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${AGNOS_VERSION}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
