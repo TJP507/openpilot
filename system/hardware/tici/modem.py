@@ -2,7 +2,9 @@
 import fcntl
 import json
 import logging
+import math
 import os
+import random
 import serial
 import signal
 import subprocess
@@ -13,11 +15,36 @@ from ipaddress import IPv4Address, AddressValueError
 
 from enum import Enum
 
-logging.basicConfig(
-  level=logging.INFO,
-  format="%(asctime)s.%(msecs)03d %(levelname)-7s modem: %(message)s",
-  datefmt="%H:%M:%S",
-)
+# The manager launches this daemon with stdout/stderr pointed at /dev/null
+# (system/manager/process.py), so route the standard logging module through
+# swaglog/cloudlog instead — otherwise every message is discarded. Falls back to
+# a plain stderr handler when swaglog is unavailable (running the module
+# standalone on a dev machine).
+try:
+  from openpilot.common.swaglog import cloudlog
+except Exception:
+  cloudlog = None
+
+
+class _CloudlogHandler(logging.Handler):
+  """Forward logging records to openpilot's swaglog (cloudlog)."""
+
+  def emit(self, record: logging.LogRecord) -> None:
+    try:
+      cloudlog.log(record.levelno, self.format(record))
+    except Exception:
+      pass
+
+
+def _setup_logging() -> None:
+  root = logging.getLogger()
+  root.setLevel(logging.INFO)
+  handler: logging.Handler = _CloudlogHandler() if cloudlog is not None else logging.StreamHandler()
+  handler.setFormatter(logging.Formatter("%(levelname)-7s modem: %(message)s"))
+  root.addHandler(handler)
+
+
+_setup_logging()
 
 AT_PORT = "/dev/modem_at0"
 PPP_PORT = "/dev/modem_at1"
@@ -31,6 +58,11 @@ REINIT_FILE = "/data/community/modem_reinit"
 # The Cellular settings UI drops USAGE_RESET_FILE to zero the counters.
 USAGE_FILE = "/data/community/cellular_usage.json"
 USAGE_RESET_FILE = "/data/community/cellular_usage_reset"
+# pppd runs with `nodetach`, so it logs to stderr; point stderr at one of these
+# files so a failed dial leaves a trace. /data/log is where the other daemons
+# log; /data/community is the fallback when that directory is not writable here.
+PPPD_LOG_CANDIDATES = ("/data/log/modem_pppd.log", "/data/community/modem_pppd.log")
+PPPD_LOG_MAX = 256 * 1024  # rotate past this so the capture file stays bounded
 AT_INIT = [
   "ATE0",       # disable command echo
   "ATV1",       # verbose result codes (CONNECT/BUSY/NO CARRIER, not numeric)
@@ -59,6 +91,19 @@ PPPD_CMD = [
   "novj", "novjccomp", "ipcp-accept-local", "ipcp-accept-remote", "nomagic",
   "user", '""', "password", '""',
 ]
+
+# After MAX_FAILS consecutive dial failures the modem reinitializes, but only
+# after waiting out an exponential backoff (capped, with jitter) so a broken
+# link cannot spin through INITIALIZING…CONNECTED every few seconds. A
+# connection that holds for STABLE_SECONDS clears the failure/backoff state.
+BACKOFF_SCHEDULE = (10, 30, 60, 120, 300)
+BACKOFF_MAX = 300
+BACKOFF_JITTER = 0.2
+STABLE_SECONDS = 60.0
+# pppd must produce a ppp0 IPv4 address within this many seconds of starting;
+# otherwise it is treated as a dial failure (e.g. an IPCP stall).
+CONNECT_TIMEOUT = 60.0
+
 INITIAL_STATE = {
   "seconds_since_boot": 0,
   "state": "INITIALIZING",
@@ -70,6 +115,11 @@ INITIAL_STATE = {
   "tx_bytes": 0, "rx_bytes": 0,
   "total_tx_bytes": 0, "total_rx_bytes": 0,
 }
+
+# Failure diagnostics (survive a reinit so the UI/heartbeat can still show why
+# the link last dropped; cleared once a connection becomes stable). Seeded
+# separately from INITIAL_STATE so a DISCONNECTING reset does not wipe them.
+FAILURE_STATE = {"fail_count": 0, "max_fails": 0, "last_error": "", "last_error_at": 0, "retry_in": 0}
 
 
 def _load_cellular_usage() -> dict:
@@ -97,11 +147,57 @@ def _save_cellular_usage(u: dict) -> None:
     pass
 
 
+def _file_size(path: str) -> int:
+  try:
+    return os.path.getsize(path)
+  except OSError:
+    return 0
+
+
+def _read_tail(path: str, offset: int, max_lines: int = 12, max_bytes: int = 4096) -> list[str]:
+  """Last non-empty lines written to path since offset (best effort)."""
+  try:
+    size = os.path.getsize(path)
+    start = max(offset, size - max_bytes)
+    with open(path, "rb") as f:
+      f.seek(start)
+      data = f.read()
+  except OSError:
+    return []
+  lines = [ln.strip() for ln in data.decode("utf-8", "replace").splitlines() if ln.strip()]
+  return lines[-max_lines:]
+
+
+def _summarize_pppd_failure(returncode: int | None, tail: list[str]) -> str:
+  """A short, human-readable reason for a pppd session ending."""
+  text = " ".join(tail).lower()
+  if "modem hangup" in text:
+    reason = "modem hung up after connecting"
+  elif "no carrier" in text:
+    reason = "no carrier"
+  elif "no dialtone" in text:
+    reason = "no dial tone"
+  elif "no answer" in text:
+    reason = "no answer"
+  elif "busy" in text:
+    reason = "line busy"
+  elif "authentication" in text and ("fail" in text or "denied" in text):
+    reason = "authentication failed"
+  elif "timeout" in text or "timed out" in text:
+    reason = "dial timed out"
+  elif tail:
+    reason = tail[-1]
+  else:
+    reason = "pppd exited"
+  return f"{reason} (pppd exit {returncode})" if returncode is not None else reason
+
+
 class State(Enum):
   INITIALIZING = "INITIALIZING"
   SEARCHING = "SEARCHING"
   CONNECTING = "CONNECTING"
   CONNECTED = "CONNECTED"
+  DIAL_FAILED = "DIAL_FAILED"  # gave up on immediate retries; backing off before reinit
   DISCONNECTING = "DISCONNECTING"
 
 
@@ -116,14 +212,58 @@ class PPPSession:
     self._proc: subprocess.Popen | None = None
     self._fails = 0
     self._peer = ""
+    self._log_fh = None
+    self._log_path = ""
+    self._log_offset = 0
+    self.started_at = 0.0
 
   def start(self):
-    self._proc = subprocess.Popen(PPPD_CMD, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    self._rotate_log()
+    self._log_offset = _file_size(self._log_path)
+    out = self._open_log()
+    self._proc = subprocess.Popen(PPPD_CMD, stdout=out, stderr=out)
+    self.started_at = time.monotonic()
     self._peer = ""
     logging.info(f"PPP dialing CID {DIAL_CID}")
 
+  def _open_log(self):
+    for path in PPPD_LOG_CANDIDATES:
+      try:
+        self._log_fh = open(path, "ab", buffering=0)
+        self._log_path = path
+        return self._log_fh
+      except OSError:
+        continue
+    self._log_fh = None
+    self._log_path = PPPD_LOG_CANDIDATES[0]
+    return subprocess.DEVNULL
+
+  def _rotate_log(self):
+    try:
+      if self._log_path and os.path.getsize(self._log_path) > PPPD_LOG_MAX:
+        os.replace(self._log_path, self._log_path + ".1")
+    except OSError:
+      pass
+
+  def _close_log(self):
+    if self._log_fh is not None:
+      try:
+        self._log_fh.close()
+      except OSError:
+        pass
+      self._log_fh = None
+
+  def capture_exit(self) -> tuple[int | None, list[str]]:
+    """Return (returncode, log tail) for the session that just ended."""
+    rc = self._proc.returncode if self._proc is not None else None
+    tail = _read_tail(self._log_path, self._log_offset)
+    self._close_log()
+    return rc, tail
+
   def kill(self):
     subprocess.run(["sudo", "killall", "-9", "pppd"], capture_output=True)
+    self._close_log()
+    self._proc = None  # a fresh CONNECTING must not see the old exit as a failure
     self._peer = ""
 
   @staticmethod
@@ -136,6 +276,10 @@ class PPPSession:
         s.dtr = True
     except Exception as e:
       logging.warning(f"data port reset failed: {e}")
+
+  @property
+  def running(self) -> bool:
+    return self._proc is not None and self._proc.poll() is None
 
   def has_exited(self) -> bool:
     return self._proc is not None and self._proc.poll() is not None
@@ -211,7 +355,20 @@ class Modem:
     self._apn = ""  # blank = network-provided via PCO
     self._roaming_allowed = True
     self.running = True
+    self._backoff_attempt = 0
+    self._backoff_until = 0.0
+    self._connected_at = 0.0
     self.S = INITIAL_STATE.copy()
+    self.S.update(FAILURE_STATE)
+    self.S["max_fails"] = PPPSession.MAX_FAILS
+    self._handlers = {
+      State.INITIALIZING: self._do_initializing,
+      State.SEARCHING: self._do_searching,
+      State.CONNECTING: self._do_connecting,
+      State.CONNECTED: self._do_connected,
+      State.DIAL_FAILED: self._do_dial_failed,
+      State.DISCONNECTING: self._do_disconnecting,
+    }
 
   @staticmethod
   def _read_param(key):
@@ -237,10 +394,13 @@ class Modem:
       return True
     return self._read_param("GsmRoaming") == "1"
 
+  def _fail_fields(self) -> dict:
+    return {"fail_count": self._ppp.fails, "max_fails": self._ppp.MAX_FAILS}
+
   def _publish_state(self, **kwargs):
     self.S.update(kwargs)
     self.S["seconds_since_boot"] = time.monotonic()
-    with tempfile.NamedTemporaryFile(mode="w", dir="/dev/shm", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(STATE_PATH), delete=False) as f:
       json.dump(self.S, f, indent=2)
     os.chmod(f.name, 0o644)
     os.replace(f.name, STATE_PATH)
@@ -393,25 +553,114 @@ class Modem:
     return State.SEARCHING
 
   def _do_connecting(self):
+    # pppd dials in the background; CONNECTING lasts until ppp0 actually has an
+    # IPv4 address. A pppd exit before that — or an IPCP stall past
+    # CONNECT_TIMEOUT — is a dial failure, not a drop from CONNECTED.
+    if self._ppp.has_exited():
+      return self._on_dial_failure()
+    if self._ppp.running:
+      ip, peer = self._ppp0_addr()
+      if ip:
+        return self._on_connected(ip, peer)
+      if self._ppp.started_at and time.monotonic() - self._ppp.started_at >= CONNECT_TIMEOUT:
+        _, tail = self._ppp.capture_exit()
+        logging.warning(f"no IP after {CONNECT_TIMEOUT:.0f}s (last pppd log: {tail[-1] if tail else 'none'})")
+        self._ppp.kill()
+        return self._on_dial_failure("Timed out waiting for an IP address")
+      return State.CONNECTING
     logging.info("starting pppd")
     self._ppp.reset_fail_counter()
     self._sim_change = False
     self._ppp.start()
+    self._publish_state(**self._fail_fields())
+    return State.CONNECTING
+
+  def _on_connected(self, ip: str, peer: str):
+    self._connected_at = time.monotonic()
+    if self._ppp.maybe_install_routes(ip, peer):
+      self._ppp.maybe_install_dns(self._read_cellular_dns())
+    logging.info(f"connected, ip {ip}")
+    self._publish_state(ip_address=ip, connected=True, last_error="", last_error_at=0, retry_in=0, **self._fail_fields())
     return State.CONNECTED
 
-  def _handle_pppd_exit(self):
+  def _on_dial_failure(self, reason: str | None = None):
+    if reason is None:
+      rc, tail = self._ppp.capture_exit()
+      reason = _summarize_pppd_failure(rc, tail)
+    give_up = self._ppp.record_fail()
+    logging.warning(f"PPP dial failed ({self._ppp.fails}/{self._ppp.MAX_FAILS}): {reason}")
+    self._publish_state(last_error=reason, last_error_at=time.monotonic(), **self._fail_fields())
+    if not give_up:
+      self._ppp.reset_data_port()
+      self._ppp.start()
+      return State.CONNECTING
+    return self._enter_backoff(reason)
+
+  def _enter_backoff(self, reason: str):
+    """Wait an exponentially longer time before the next full reinit."""
+    delay = self._backoff_delay(self._backoff_attempt)
+    self._backoff_attempt += 1
+    self._backoff_until = time.monotonic() + delay
+    logging.warning(f"backing off {delay:.0f}s before reinitializing: {reason}")
+    self._publish_state(state=State.DIAL_FAILED.value, retry_in=math.ceil(delay),
+                        last_error=reason, last_error_at=time.monotonic(), **self._fail_fields())
+    return State.DIAL_FAILED
+
+  @staticmethod
+  def _backoff_delay(attempt: int) -> float:
+    base = BACKOFF_SCHEDULE[attempt] if attempt < len(BACKOFF_SCHEDULE) else BACKOFF_MAX
+    jitter = random.uniform(-BACKOFF_JITTER, BACKOFF_JITTER)
+    return max(1.0, min(base * (1 + jitter), BACKOFF_MAX))
+
+  def _reset_backoff(self):
+    self._backoff_attempt = 0
+    self._backoff_until = 0.0
+
+  def _do_dial_failed(self):
+    remaining = self._backoff_until - time.monotonic()
+    if remaining <= 0:
+      logging.info("backoff elapsed, reinitializing")
+      return State.DISCONNECTING
+    self._publish_state(state=State.DIAL_FAILED.value, retry_in=max(0, math.ceil(remaining)))
+    return State.DIAL_FAILED
+
+  def _do_connected(self):
+    if self._ppp.has_exited():
+      return self._on_dial_failure()
+
     if self._sim_change or not os.path.exists(AT_PORT):
       return State.DISCONNECTING
-    give_up = self._ppp.record_fail()
-    if give_up:
-      logging.warning(f"PPP fail {self._ppp.fails}/{self._ppp.MAX_FAILS}, reconnecting")
-      return State.DISCONNECTING
-    logging.warning(f"PPP fail {self._ppp.fails}/{self._ppp.MAX_FAILS}, retrying")
-    self._ppp.reset_data_port()
-    if not os.path.exists(AT_PORT):
-      return State.DISCONNECTING
-    self._ppp.start()
+
+    ip, _ = self._ppp0_addr()
+    if not ip:
+      # pppd is still up but ppp0 lost its address: treat it as a dial failure
+      # so we never report CONNECTED without an IP. Capture the pppd tail before
+      # kill() clears the process.
+      logging.warning("ppp0 lost its address while connected")
+      self._ppp.capture_exit()
+      self._ppp.kill()
+      return self._on_dial_failure("Connection lost (no IP on ppp0)")
+
+    self._poll()
+    self._mark_stable()
     return State.CONNECTED
+
+  def _mark_stable(self):
+    if self._connected_at and time.monotonic() - self._connected_at >= STABLE_SECONDS:
+      if self._ppp.fails or self._backoff_attempt:
+        logging.info(f"connection stable for {STABLE_SECONDS:.0f}s, clearing failure/backoff state")
+        self._ppp.reset_fail_counter()
+        self._reset_backoff()
+      self._connected_at = 0.0
+
+  def _do_disconnecting(self):
+    logging.warning("reconnecting")
+    self._publish_state(**INITIAL_STATE, retry_in=0)
+    self._ppp.kill()
+    self._ppp.cleanup_routes()
+    self._ppp.reset_data_port()
+    self._sim_change = False
+    return State.INITIALIZING
 
   def _params_changed(self) -> bool:
     new_apn = self._read_param("GsmApn")
@@ -432,24 +681,26 @@ class Modem:
       logging.warning(f"iccid changed: {self.S['iccid']} -> {iccid}")
       self._sim_change = True
 
-  def _do_connected(self):
-    if self._ppp.has_exited():
-      return self._handle_pppd_exit()
+  def _preflight(self, state: State) -> State:
+    """React to reinit requests and APN/roaming edits from any live state.
 
-    if self._sim_change or not os.path.exists(AT_PORT):
+    Acting here (not just while CONNECTED) means an APN typed in while the modem
+    is still SEARCHING/CONNECTING is applied, and it resets the backoff so the
+    user's explicit request takes effect immediately."""
+    if state in (State.INITIALIZING, State.DISCONNECTING):
+      return state
+    if os.path.exists(REINIT_FILE):
+      try:
+        os.remove(REINIT_FILE)
+      except OSError:
+        pass
+      logging.info("reinitialize requested")
+      self._reset_backoff()
       return State.DISCONNECTING
-
-    self._poll()
-    return State.CONNECTED
-
-  def _do_disconnecting(self):
-    logging.warning("reconnecting")
-    self._publish_state(**INITIAL_STATE)
-    self._ppp.kill()
-    self._ppp.cleanup_routes()
-    self._ppp.reset_data_port()
-    self._sim_change = False
-    return State.INITIALIZING
+    if self._params_changed():
+      self._reset_backoff()
+      return State.DISCONNECTING
+    return state
 
   def _poll_signal(self) -> dict:
     v = self._atv("AT+CSQ", "+CSQ:")
@@ -503,27 +754,33 @@ class Modem:
     except (ValueError, IndexError):
       return {}
 
-  def _poll_iface(self) -> dict:
+  @staticmethod
+  def _ppp0_addr() -> tuple[str, str]:
+    """Return (ip, peer) for ppp0, or ("", "") when it has no IPv4 address."""
     try:
       r = subprocess.run(["ip", "-4", "addr", "show", "ppp0"], capture_output=True, text=True, timeout=2)
-      ip, peer = "", ""
       for line in r.stdout.splitlines():
         # `inet 10.x.x.x peer 10.64.64.64/32 ...`
         parts = line.strip().split()
         if "inet" in parts:
           i = parts.index("inet")
           ip = parts[i + 1].split("/")[0]
+          peer = ""
           if "peer" in parts:
             peer = parts[parts.index("peer") + 1].split("/")[0]
-          break
-      if ip:
-        if self._ppp.maybe_install_routes(ip, peer):
-          self._ppp.maybe_install_dns(self._read_cellular_dns())
-        return {"ip_address": ip, "connected": True}
-      if self.S["connected"]:
-        return {"connected": False, "ip_address": ""}
+          return ip, peer
     except Exception:
       pass
+    return "", ""
+
+  def _poll_iface(self) -> dict:
+    ip, peer = self._ppp0_addr()
+    if ip:
+      if self._ppp.maybe_install_routes(ip, peer):
+        self._ppp.maybe_install_dns(self._read_cellular_dns())
+      return {"ip_address": ip, "connected": True}
+    if self.S["connected"]:
+      return {"connected": False, "ip_address": ""}
     return {}
 
   def _read_cellular_dns(self) -> list[str]:
@@ -579,6 +836,22 @@ class Modem:
     if s:
       self._publish_state(**s)
 
+  def _step(self, state: State) -> State:
+    """One state-machine tick: check for external triggers, run the handler, and
+    contain any exception as a backoff instead of a tight reinit loop."""
+    try:
+      self._check_iccid(state)
+      state = self._preflight(state)
+      prev = state
+      state = self._handlers[state]()
+      if state != prev:
+        self._publish_state(state=state.value)
+        logging.info(f"{prev.value} -> {state.value}")
+    except Exception as e:
+      logging.exception(f"error in {state.value}")
+      state = self._enter_backoff(f"internal error: {e}")
+    return state
+
   def run(self):
     logging.info("starting")
     self._publish_state(state=State.INITIALIZING.value)
@@ -588,41 +861,8 @@ class Modem:
     self._ppp.kill()
 
     state = State.INITIALIZING
-
-    handlers = {
-      State.INITIALIZING: self._do_initializing,
-      State.SEARCHING: self._do_searching,
-      State.CONNECTING: self._do_connecting,
-      State.CONNECTED: self._do_connected,
-      State.DISCONNECTING: self._do_disconnecting,
-    }
-
     while self.running:
-      try:
-        self._check_iccid(state)
-
-        # React to APN/roaming edits and reinitialize requests from any state, not
-        # just while CONNECTED. Otherwise an APN typed in while the modem is still
-        # SEARCHING/CONNECTING is never applied.
-        if state not in (State.INITIALIZING, State.DISCONNECTING):
-          if os.path.exists(REINIT_FILE):
-            try:
-              os.remove(REINIT_FILE)
-            except OSError:
-              pass
-            logging.info("reinitialize requested")
-            state = State.DISCONNECTING
-          elif self._params_changed():
-            state = State.DISCONNECTING
-
-        prev = state
-        state = handlers[state]()
-        if state != prev:
-          self._publish_state(state=state.value)
-          logging.info(f"{prev.value} -> {state.value}")
-      except Exception:
-        logging.exception(f"error in {state.value}")
-        state = State.DISCONNECTING
+      state = self._step(state)
       time.sleep(STATE_WAIT)
 
   def stop(self):

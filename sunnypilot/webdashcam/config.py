@@ -31,7 +31,7 @@ KEY_PATH = os.path.join(STATE_DIR, "webdashcam.key")
 DEFAULT_USER = "admin"
 PORT = 8443
 
-PASSWORD_LENGTH = 8
+PASSWORD_LENGTH = 12
 # Letters and numbers only. Ambiguous characters (0/O, 1/l/I) are dropped so the
 # password can be read off the device screen and typed into a phone without mistakes.
 _ALPHABET = "".join(c for c in string.ascii_letters + string.digits if c not in "0O1lI")

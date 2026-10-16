@@ -9,6 +9,10 @@ from cereal import messaging
 from openpilot.system.hardware import TICI
 from openpilot.common.realtime import Priority, config_realtime_process, set_core_affinity
 from openpilot.system.ui.lib.application import gui_app
+try:
+  from openpilot.sunnypilot.tylerpilot import toast as _tp_toast
+except Exception:
+  _tp_toast = None
 def _ui_fatal() -> None:
   # TEMP diagnostic: if the UI fails to start, the screen would otherwise just
   # stay on the boot logo (the UI is what draws). Surface the traceback on screen.
@@ -46,6 +50,28 @@ except Exception:
 BIG_UI = gui_app.big_ui()
 
 
+def _draw_tylerpilot_toast():
+  """Small overlay shown when TylerPilot runs a remote action."""
+  if _tp_toast is None:
+    return
+  try:
+    text = _tp_toast.current()
+  except Exception:
+    text = None
+  if not text:
+    return
+  font_size = 42
+  pad = 22
+  w = rl.measure_text(text, font_size) + pad * 2
+  h = font_size + pad
+  x = (gui_app.width - w) / 2
+  y = 44
+  rect = rl.Rectangle(x, y, w, h)
+  rl.draw_rectangle_rounded(rect, 0.3, 8, rl.Color(20, 22, 28, 235))
+  rl.draw_rectangle_rounded_lines(rect, 0.3, 8, rl.Color(76, 141, 255, 255))
+  rl.draw_text(text, int(x + pad), int(y + pad / 2) - 2, font_size, rl.WHITE)
+
+
 def main():
   try:
     cores = {5, }
@@ -76,6 +102,8 @@ def main():
         msg.uiDebug.cpuTimeMillis = (cpu_time + extra_cpu) * 1000
         msg.uiDebug.frameTimeMillis = frame_time * 1000
         pm.send('uiDebug', msg)
+
+        _draw_tylerpilot_toast()
   except Exception:
     _ui_fatal()
     raise

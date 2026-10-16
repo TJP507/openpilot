@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 from dataclasses import dataclass
 
+from openpilot.sunnypilot.webdashcam import timeutil
 from openpilot.system.hardware.hw import Paths
 
 FFMPEG = "/usr/local/venv/bin/ffmpeg"
@@ -43,15 +43,21 @@ class Clip:
 
   @property
   def date_text(self) -> str:
-    return time.strftime("%b %d, %Y", time.localtime(self.mtime))
+    return timeutil.date_label(date_of(self.mtime))
 
   @property
   def time_text(self) -> str:
-    return time.strftime("%I:%M:%S %p", time.localtime(self.mtime))
+    return timeutil.time_text(self.mtime)
 
 
 def date_of(mtime: float) -> str:
-  return time.strftime("%Y-%m-%d", time.localtime(mtime))
+  """Group key for a segment: a UTC YYYY-MM-DD, or UNKNOWN_DATE before the clock was set."""
+  return timeutil.date_text(mtime) if timeutil.is_valid(mtime) else timeutil.UNKNOWN_DATE
+
+
+def date_label(date: str) -> str:
+  """Display label for a date group key (maps the unknown sentinel)."""
+  return timeutil.date_label(date)
 
 
 def _has_video_data(path: str) -> bool:
@@ -139,13 +145,26 @@ def segments_on_date(date: str) -> list:
   return [seg_dir for _name, seg_dir, mt in list_segments() if date_of(mt) == date]
 
 
-def list_date_counts() -> dict:
-  """Number of finished segments recorded on each date, across all cameras."""
+def group_dates(segments: list) -> dict:
+  """Count segments per date group: a UTC day, or UNKNOWN_DATE, across all cameras."""
   counts: dict = {}
-  for _name, _seg_dir, mt in list_segments():
+  for _name, _seg_dir, mt in segments:
     date = date_of(mt)
     counts[date] = counts.get(date, 0) + 1
   return counts
+
+
+def sorted_date_groups(counts: dict) -> list:
+  """Date group keys newest first, with the unknown-date group always last."""
+  known = sorted((d for d in counts if d != timeutil.UNKNOWN_DATE), reverse=True)
+  if timeutil.UNKNOWN_DATE in counts:
+    known.append(timeutil.UNKNOWN_DATE)
+  return known
+
+
+def list_date_counts() -> dict:
+  """Number of finished segments recorded on each date, across all cameras."""
+  return group_dates(list_segments())
 
 
 def delete_segments(seg_dirs: list) -> tuple:
@@ -210,8 +229,7 @@ def segment_info(name: str, seg_dir: str, mtime: float) -> dict:
   return {
     "seg": name,
     "mtime": mtime,
-    "time": time.strftime("%I:%M:%S %p", time.localtime(mtime)),
-    "date": date_of(mtime),
+    "time": timeutil.time_text(mtime),
     "cameras": cameras,
   }
 
@@ -220,7 +238,7 @@ def mp4_stream_command(src: str) -> list[str]:
   """ffmpeg argv that remuxes `src` to a fragmented MP4 on stdout (no temp file).
 
   Fragmented output is required: the result is streamed straight to the client,
-  so it must be playable before the muxer can seek back and finalise a header.
+  so it must be playable before the muxer can seek back and finalize a header.
   """
   cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostats"]
   if not src.endswith(".ts"):

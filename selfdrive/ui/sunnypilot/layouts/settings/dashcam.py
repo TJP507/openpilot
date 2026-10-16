@@ -33,9 +33,10 @@ import pyray as rl
 
 from openpilot.common.basedir import BASEDIR
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.sunnypilot.webdashcam.library import CAMERAS, FFMPEG, PLAYER_FPS, SEGMENT_SECONDS, \
+from openpilot.sunnypilot.webdashcam import timeutil
+from openpilot.sunnypilot.webdashcam.library import CAMERAS, PLAYER_FPS, \
                                                        Clip, list_clips, list_date_counts, segments_on_date, \
-                                                       segment_mtime, segment_cameras, delete_segments
+                                                       delete_segments, date_of, date_label, sorted_date_groups
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -885,7 +886,10 @@ class DashCamPlayer(NavWidget):
 
     if self._clips:
       clip = self._clips[self._index]
-      title = f"{clip.date_text}   {clip.time_text}   -   segment {clip.segment}"
+      if date_of(clip.mtime) == timeutil.UNKNOWN_DATE:
+        title = f"{clip.name}   -   {tr('Time unknown')}"
+      else:
+        title = f"{clip.date_text}   {clip.time_text} UTC   -   segment {clip.segment}"
       rl.draw_text_ex(self._font, title, rl.Vector2(rect.x + 40, rect.y + 30), 40, 0, rl.WHITE)
       if total > 0:
         label = f"{_fmt_time(cur_fidx / PLAYER_FPS)} / {_fmt_time(total / PLAYER_FPS)}"
@@ -949,8 +953,14 @@ class _ClipRow(Widget):
     rl.draw_rectangle_rounded(rect, 0.15, 8, bg)
 
     text_x = rect.x + 40
-    rl.draw_text_ex(self._font, self._clip.time_text, rl.Vector2(text_x, rect.y + 28), 46, 0, rl.WHITE)
-    rl.draw_text_ex(self._small, tr("segment") + f" {self._clip.segment}", rl.Vector2(text_x, rect.y + 88), 34, 0, SUBTEXT_COLOR)
+    if date_of(self._clip.mtime) == timeutil.UNKNOWN_DATE:
+      title = tr("Time unknown")
+      sub = tr("Segment") + f" {self._clip.name}"
+    else:
+      title = self._clip.time_text + " UTC"
+      sub = tr("segment") + f" {self._clip.segment}"
+    rl.draw_text_ex(self._font, title, rl.Vector2(text_x, rect.y + 28), 46, 0, rl.WHITE)
+    rl.draw_text_ex(self._small, sub, rl.Vector2(text_x, rect.y + 88), 34, 0, SUBTEXT_COLOR)
     _draw_text_button(self._delete_rect(rect), tr("Delete"), self._small, color=rl.Color(150, 45, 45, 255))
 
 
@@ -986,7 +996,7 @@ class _DateRow(Widget):
   def _render(self, rect: rl.Rectangle) -> None:
     bg = ROW_BG_PRESSED if self.is_pressed else ROW_BG
     rl.draw_rectangle_rounded(rect, 0.15, 8, bg)
-    rl.draw_text_ex(self._font, self._date, rl.Vector2(rect.x + 40, rect.y + 30), 52, 0, rl.WHITE)
+    rl.draw_text_ex(self._font, date_label(self._date), rl.Vector2(rect.x + 40, rect.y + 30), 52, 0, rl.WHITE)
     rl.draw_text_ex(self._small, f"{self._count} " + tr("clip(s)"), rl.Vector2(rect.x + 40, rect.y + 96), 34, 0, SUBTEXT_COLOR)
     _draw_text_button(self._delete_rect(rect), tr("Delete day"), self._small, color=rl.Color(150, 45, 45, 255))
 
@@ -1025,17 +1035,21 @@ class DashCamLayout(Widget):
   def _open_date(self, date: str) -> None:
     self._selected_date = date
     # Default to a camera that actually has clips that day.
-    if not any(time.strftime("%Y-%m-%d", time.localtime(c.mtime)) == date for c in self._clips):
+    if not any(date_of(c.mtime) == date for c in self._clips):
       for idx, (_, camera_file) in enumerate(CAMERAS):
         if idx == self._camera_idx:
           continue
-        if any(time.strftime("%Y-%m-%d", time.localtime(c.mtime)) == date for c in list_clips(camera_file)):
+        if any(date_of(c.mtime) == date for c in list_clips(camera_file)):
           self._camera_idx = idx
           break
     self._reload()
 
   def _clips_on_date(self, date: str) -> list[Clip]:
-    return [c for c in self._clips if time.strftime("%Y-%m-%d", time.localtime(c.mtime)) == date]
+    clips = [c for c in self._clips if date_of(c.mtime) == date]
+    if date == timeutil.UNKNOWN_DATE:
+      # The mtime is not trustworthy for these, so order by segment name.
+      clips.sort(key=lambda c: c.name)
+    return clips
 
   def _visible_clips(self) -> list[Clip]:
     return self._clips_on_date(self._selected_date) if self._selected_date else list(self._clips)
@@ -1048,7 +1062,8 @@ class DashCamLayout(Widget):
     gui_app.push_widget(ConfirmDialog(text, tr("Delete"), callback=cb))
 
   def _delete_clip(self, clip: Clip) -> None:
-    msg = tr("Delete this recording?") + f"  {clip.time_text}  -  " + tr("segment") + f" {clip.segment}"
+    when = tr("Time unknown") if date_of(clip.mtime) == timeutil.UNKNOWN_DATE else clip.time_text + " UTC"
+    msg = tr("Delete this recording?") + f"  {when}  -  " + tr("segment") + f" {clip.segment}"
 
     def do_delete():
       delete_segments([os.path.dirname(clip.path)])
@@ -1079,7 +1094,7 @@ class DashCamLayout(Widget):
     if self._selected_date is None:
       # Root: only dates, counted across every camera.
       counts = list_date_counts()
-      for d in sorted(counts.keys(), reverse=True):
+      for d in sorted_date_groups(counts):
         rows.append(_DateRow(d, counts[d], lambda d=d: self._open_date(d), self._delete_date))
     else:
       for c in self._clips_on_date(self._selected_date):
@@ -1117,11 +1132,12 @@ class DashCamLayout(Widget):
     if not self._loaded:
       self._reload()
 
-    date_label = self._selected_date if isinstance(self._selected_date, str) else ""
+    selected = self._selected_date if isinstance(self._selected_date, str) else ""
 
-    if not date_label:
+    if not selected:
       # Root: dates only - no camera picker until a date is opened.
-      rl.draw_text_ex(self._small, tr("Select a date"), rl.Vector2(rect.x, rect.y), 34, 0, SUBTEXT_COLOR)
+      rl.draw_text_ex(self._small, tr("Select a date") + "  -  " + tr("Times in UTC"),
+                      rl.Vector2(rect.x, rect.y), 34, 0, SUBTEXT_COLOR)
       list_y = rect.y + 50
     else:
       py = rect.y + 50
@@ -1134,7 +1150,7 @@ class DashCamLayout(Widget):
 
       ctrl_y = py + ph + 18
       self._btn_back.render(rl.Rectangle(rect.x, ctrl_y, 200, 84))
-      rl.draw_text_ex(self._font, date_label, rl.Vector2(rect.x + 220, ctrl_y + 12), 48, 0, rl.WHITE)
+      rl.draw_text_ex(self._font, date_label(selected), rl.Vector2(rect.x + 220, ctrl_y + 12), 48, 0, rl.WHITE)
       list_y = ctrl_y + 84 + 22
 
     list_rect = rl.Rectangle(rect.x, list_y, rect.width, rect.height - (list_y - rect.y))

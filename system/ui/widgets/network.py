@@ -10,6 +10,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.scroll_panel import GuiScrollPanel
 from openpilot.system.ui.lib.wifi_manager import WifiManager, SecurityType, Network, MeteredType, normalize_ssid
+from openpilot.system.hardware.tici.modem_format import error_text, retry_text, state_label, status_detail
 from openpilot.system.ui.widgets import DialogResult, Widget
 from openpilot.system.ui.widgets.button import ButtonStyle, Button
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
@@ -168,7 +169,6 @@ class WifiPanel(Widget):
 
   def _render(self, rect: rl.Rectangle):
     if self._show_settings:
-      nav_rect = rl.Rectangle(rect.x, rect.y, rect.width, self._networks_btn.rect.height)
       self._networks_btn.set_rect(rl.Rectangle(rect.x + rect.width - self._networks_btn.rect.width, rect.y,
                                                 self._networks_btn.rect.width, self._networks_btn.rect.height))
       self._networks_btn.render()
@@ -227,13 +227,17 @@ class CellularSettings(Widget):
                                          callback=self._reinit_modem)
 
     # Status items
+    self._error_item = text_item(lambda: tr("Last Error"), lambda: self._fmt_error())
+    self._retry_item = text_item(lambda: tr("Retrying"), lambda: self._fmt_retry())
     items: list[Widget] = [
-      text_item(lambda: tr("Status"), lambda: self._fmt_state()),
+      text_item(lambda: tr("Status"), lambda: self._fmt_state(), description=lambda: self._fmt_status_detail()),
       text_item(lambda: tr("Signal"), lambda: self._fmt_signal()),
       text_item(lambda: tr("Network Type"), lambda: self._modem_state.get("network_type", "N/A")),
       text_item(lambda: tr("Operator"), lambda: self._modem_state.get("operator", "N/A")),
       text_item(lambda: tr("IP Address"), lambda: self._modem_state.get("ip_address", "N/A")),
       text_item(lambda: tr("Registration"), lambda: self._fmt_registration()),
+      self._error_item,
+      self._retry_item,
       text_item(lambda: tr("Band"), lambda: self._modem_state.get("band", "N/A")),
       text_item(lambda: tr("Channel"), lambda: str(self._modem_state.get("channel", "N/A"))),
       self._roaming_btn,
@@ -250,12 +254,19 @@ class CellularSettings(Widget):
     self._scroller = Scroller(items, line_separator=True, spacing=0)
 
   def _fmt_state(self) -> str:
-    raw = self._modem_state.get("state", "N/A")
-    return raw.title()
+    return state_label(self._modem_state.get("state"))
+
+  def _fmt_status_detail(self) -> str:
+    return status_detail(self._modem_state)
+
+  def _fmt_error(self) -> str:
+    return error_text(self._modem_state)
+
+  def _fmt_retry(self) -> str:
+    return retry_text(self._modem_state)
 
   def _fmt_signal(self) -> str:
     quality = self._modem_state.get("signal_quality")
-    strength = self._modem_state.get("signal_strength")
     if quality is None:
       return "N/A"
     return f"{quality}%"
@@ -334,6 +345,9 @@ class CellularSettings(Widget):
     self._roaming_btn.set_visible(show_cell_settings)
     self._apn_btn.set_visible(show_cell_settings)
     self._cellular_metered_btn.set_visible(show_cell_settings)
+    # Only surface the failure rows when there is something to show.
+    self._error_item.set_visible(bool(self._fmt_error()))
+    self._retry_item.set_visible(self._modem_state.get("state") == "DIAL_FAILED")
 
   def _render(self, _):
     self._scroller.render(self._rect)
