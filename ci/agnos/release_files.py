@@ -23,6 +23,9 @@ blacklist = [
   ".venv/",
   ".github/workflows/",
 
+  # fork-specific: CI infrastructure is not release content
+  "^ci/",
+
   "matlab.*.md",
 
   # no LFS or submodules in release

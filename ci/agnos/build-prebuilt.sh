@@ -2,11 +2,14 @@
 #
 # Build the comma 3X (larch64) prebuilt tree *inside* the AGNOS build image.
 #
-# This mirrors the build stage of sunnypilot's
+# Mirrors the build stage of sunnypilot's
 # `.github/workflows/sunnypilot-build-prebuilt.yaml` (self-hosted tici runner):
 # same environment setup, same release-tree assembly, same scons invocation.
-# It does NOT strip or publish (that is a later block); it only produces the
-# built tree and records what scons produced under panda/board/obj.
+# It produces the built tree and verifies that everything is regenerated from
+# in-tree source (the source branch carries no committed build outputs) and
+# that the pinned panda firmware is installed rather than compiled.
+#
+# Stripping / version.h / publishing happen in the workflow, on the runner.
 #
 # Env overrides:
 #   REPO_DIR     repo checkout               (default /work)
@@ -58,5 +61,39 @@ SKIP_TINYGRAD_COMPILE=1 scons -j"$(nproc)" cache_dir="$SCONS_CACHE" --minimal
 
 touch "$BUILD_DIR/prebuilt"
 
-echo "== panda/board/obj (recorded only; pinning is a later block) =="
-ls -la "$BUILD_DIR/panda/board/obj" || true
+echo "== verify regenerated artifacts =="
+missing=0
+for f in \
+  common/params_pyx.so \
+  msgq_repo/msgq/ipc_pyx.so \
+  msgq_repo/msgq/visionipc/visionipc_pyx.so \
+  rednose_repo/rednose/helpers/ekf_sym_pyx.so \
+  selfdrive/locationd/models/generated/libcar.so \
+  selfdrive/locationd/models/generated/libpose.so \
+  sunnypilot/selfdrive/locationd/models/generated/liblive.so \
+  selfdrive/controls/lib/lateral_mpc_lib/c_generated_code/libacados_ocp_solver_lat.so \
+  selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/libacados_ocp_solver_long.so \
+  selfdrive/pandad/pandad ; do
+  if [ -f "$BUILD_DIR/$f" ]; then echo "  ok   $f"; else echo "  MISSING $f"; missing=1; fi
+done
+[ "$missing" = 0 ] || { echo "ERROR: build did not regenerate expected artifacts" >&2; exit 1; }
+
+echo "== verify pinned panda firmware =="
+python3 - "$BUILD_DIR" <<'PY'
+import sys
+build = sys.argv[1]
+def sig(path):
+  with open(path, 'rb') as f:
+    f.seek(-128, 2)
+    return f.read(128)
+built = sig(f"{build}/panda/board/obj/panda_h7.bin.signed")
+pinned = sig(f"{build}/panda/board/pinned/panda_h7.bin.signed")
+print("  built  signature:", built.hex())
+print("  pinned signature:", pinned.hex())
+assert built == pinned, "panda firmware signature does not match the pinned staging signature"
+assert built[:8].hex() == "406de22bd6d19eca", f"unexpected pinned signature prefix {built[:8].hex()}"
+print("  OK: panda signature == 406de22bd6d19eca… (matches pinned staging-c3x)")
+PY
+
+echo "== panda/board/obj (should be the pinned files) =="
+ls -la "$BUILD_DIR/panda/board/obj"
