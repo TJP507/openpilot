@@ -14,6 +14,11 @@ on:
         description: 'Build image reference (pin by digest for reproducibility)'
         required: false
         default: 'ghcr.io/tjp507/openpilot-agnos-build:18.4'
+  # TEMPORARY: registers the workflow (workflow_dispatch requires the file on
+  # the default branch). Remove before merge — the intended trigger is
+  # workflow_dispatch only.
+  push:
+    branches: [ ci/agnos-build ]
 
 permissions:
   contents: read
