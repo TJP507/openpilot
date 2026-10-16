@@ -19,8 +19,12 @@ BUILD_DIR="${BUILD_DIR:-$REPO_DIR/build}"
 SCONS_CACHE="${SCONS_CACHE:-/scons_cache}"
 
 echo "== AGNOS userland =="
+# /etc/profile.d scripts are device-oriented and reference unbound vars, so
+# relax `nounset` while sourcing the AGNOS profile.
 # shellcheck disable=SC1091
+set +u
 source /etc/profile   # activates /usr/local/venv (scons/cython/capnpc/arm-none-eabi-*)
+set -u
 echo "uname -m: $(uname -m)"
 if [ -f /TICI ]; then echo "/TICI present -> arch=larch64"; else echo "ERROR: /TICI missing" >&2; exit 1; fi
 clang --version | head -1
