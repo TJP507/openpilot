@@ -31,9 +31,10 @@ export UV_PROJECT_ENVIRONMENT="${HOME}/venv"
 export UV_PYTHON_PREFERENCE=managed
 export UV_PYTHON_INSTALL_DIR="${HOME}/uv/python"
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
-# Best effort: the AGNOS venv already contains every dependency the build
-# needs, so a failure here must not abort the build.
-uv sync || echo "WARNING: 'uv sync' failed; continuing with the AGNOS venv"
+# Use the real binary, not /usr/comma/shims/uv: the shim remounts/resizes the
+# root filesystem and needs privileges a plain container does not have. The
+# AGNOS venv already contains every dependency, so a failure here is non-fatal.
+/usr/bin/uv sync || echo "WARNING: 'uv sync' failed; continuing with the AGNOS venv"
 
 echo "== assemble release tree =="
 cd "$REPO_DIR"

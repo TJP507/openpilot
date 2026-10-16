@@ -96,5 +96,14 @@ docker build --platform linux/arm64 \
 
 # 3. Smoke test (arm64; use qemu/binfmt on x86_64)
 docker run --rm --platform linux/arm64 ghcr.io/tjp507/openpilot-agnos-build:18.4 \
-  bash -lc 'uname -m; clang --version | head -1; scons --version | head -1'
+  bash -c 'source /etc/profile; uname -m; clang --version | head -1; scons --version | head -1'
 ```
+
+## Container notes
+
+- `/etc/profile` activates `/usr/local/venv` and prepends `/usr/comma/shims` to
+  `PATH`. The `uv`/`pip` shims are device-only: they remount `/`, resize the
+  root filesystem, and remount `/tmp` (exit 32 in an unprivileged container).
+  The build therefore calls `/usr/bin/uv` directly.
+- `/etc/profile` also points `PYTHONPATH` at `/data/pythonpath` (the device's
+  data partition, absent in the container); the build overrides `PYTHONPATH`.

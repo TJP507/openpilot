@@ -80,7 +80,7 @@ jobs:
             test -f /TICI && echo "/TICI OK"
             clang --version | head -1
             scons --version | head -1
-            uv --version
+            /usr/bin/uv --version
             python3 -c "import numpy, acados, capnproto; print(\"AGNOS venv deps OK numpy=\"+numpy.__version__)"
           '
 
