@@ -12,9 +12,7 @@ name: build-prebuilt
 
 on:
   push:
-    # TEMPORARY: ci/agnos-build registers this workflow so it can be dispatched
-    # (workflow_dispatch needs the file on the default branch). Remove before merge.
-    branches: [ dev-c3x, ci/agnos-build ]
+    branches: [ dev-c3x ]
   workflow_dispatch:
     inputs:
       source_ref:
