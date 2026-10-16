@@ -99,6 +99,21 @@ docker run --rm --platform linux/arm64 ghcr.io/tjp507/openpilot-agnos-build:18.4
   bash -c 'source /etc/profile; uname -m; clang --version | head -1; scons --version | head -1'
 ```
 
+## Proof build (Block 10a)
+
+`build-prebuilt-test.yaml` compiled `dev-c3x` in the image on `ubuntu-24.04-arm`:
+
+- image build (`agnos-build-image`): ~4m30s incl. download/verify/extract/import/push;
+  pushed digest `ghcr.io/tjp507/openpilot-agnos-build@sha256:af307d4c…`.
+- proof build job: ~2m50s total; `scons` ~1m32s (fast because `dev-c3x` already
+  commits 18 prebuilt `.so`, so many targets are up to date).
+- comparison vs `origin/staging-c3x` (`compare-prebuilt.sh`): canonical `.so`
+  and ELF-executable sets are **identical**, all aarch64. Only differences were
+  transport/expected: `upload-artifact` dereferences symlinks and (by default)
+  drops hidden files, and the tree is unstripped. `panda/board/obj` was rebuilt
+  as `DEV-8351ae21-DEBUG` (signature differs from the pinned committed
+  `DEV-unknown-DEBUG`) — the known pinning issue, not solved here.
+
 ## Container notes
 
 - `/etc/profile` activates `/usr/local/venv` and prepends `/usr/comma/shims` to
