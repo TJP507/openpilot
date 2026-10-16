@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""
+Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+
+This file is part of sunnypilot and is licensed under the MIT License.
+See the LICENSE.md file in the root directory for more details.
+
+Compose and validate TylerPilot fork versions.
+
+`sunnypilot/common/version.h` holds only the fork base (e.g. "2026.002.029").
+This helper is the single place the release pipeline derives the full
+"<base>-tp.<N>" string and the `ci/<base>-tp.<N>` tag from, so
+`build-prebuilt.yaml` and `promote-release.yaml` cannot drift from the runtime
+(`openpilot.system.version.get_version`). See ci/agnos/README.md ("Versioning").
+
+Usage:
+  ci/version base  [--repo-root DIR]                  # base from version.h
+  ci/version dev   [--repo-root DIR]                  # <base>-tp.dev
+  ci/version next  [--repo-root DIR] [--tags FILE]    # <base>-tp.<N> (tags from FILE or stdin)
+  ci/version check VERSION                            # exit 0 iff <base>-tp.<N>
+"""
+import argparse
+import importlib.util
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("version_scheme", ROOT / "sunnypilot" / "common" / "version_scheme.py")
+version_scheme = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(version_scheme)
+
+
+def read_base(repo_root: str) -> str:
+  path = pathlib.Path(repo_root) / "sunnypilot" / "common" / "version.h"
+  with open(path) as f:
+    return f.read().split('"')[1]
+
+
+def main(argv=None) -> int:
+  parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  sub = parser.add_subparsers(dest="command", required=True)
+
+  p_base = sub.add_parser("base", help="print the base version from version.h")
+  p_base.add_argument("--repo-root", default=str(ROOT))
+
+  p_dev = sub.add_parser("dev", help="print the on-device source version")
+  p_dev.add_argument("--repo-root", default=str(ROOT))
+
+  p_next = sub.add_parser("next", help="print the next <base>-tp.<N>")
+  p_next.add_argument("--repo-root", default=str(ROOT))
+  p_next.add_argument("--tags", help="file of existing tag names (default: stdin)")
+
+  p_check = sub.add_parser("check", help="exit 0 iff VERSION is a published <base>-tp.<N>")
+  p_check.add_argument("version")
+
+  args = parser.parse_args(argv)
+
+  if args.command == "check":
+    return 0 if version_scheme.is_full_version(args.version) else 1
+
+  base = read_base(args.repo_root)
+  if not version_scheme.is_base(base):
+    print(f"ERROR: version.h base {base!r} is not <YYYY.MMM.PPP>", file=sys.stderr)
+    return 2
+
+  if args.command == "base":
+    print(base)
+  elif args.command == "dev":
+    print(version_scheme.dev_version(base))
+  elif args.command == "next":
+    stream = open(args.tags) if args.tags else sys.stdin
+    try:
+      # Accept both bare tag names and `git ls-remote` output (`refs/tags/<t>`).
+      tags = [line.strip().removeprefix("refs/tags/").removesuffix("^{}") for line in stream if line.strip()]
+    finally:
+      if args.tags:
+        stream.close()
+    print(version_scheme.ci_version(base, version_scheme.next_ci_number(base, tags)))
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main())

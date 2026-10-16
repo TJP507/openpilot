@@ -33,8 +33,10 @@ permissions:
   contents: read
 
 concurrency:
+  # Serialize builds per ref: a queued dev push must still get its own build
+  # (and its own -tp.<N>), so runs wait rather than cancel each other.
   group: build-prebuilt-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   PYTHONPATH: ${{ github.workspace }}
@@ -78,6 +80,7 @@ jobs:
           pytest -o addopts="" --confcutdir=sunnypilot -m "not slow and not tici" \
             sunnypilot/mapd/tests/test_mapd_version.py \
             sunnypilot/selfdrive/selfdrived/tests/test_button_state_tracker.py \
+            sunnypilot/common/tests/test_version_scheme.py \
             sunnypilot/webdashcam/tests
 
   tylerpilot:
@@ -201,13 +204,14 @@ jobs:
           find third_party/ -name '*Darwin*' -exec rm -r {} + 2>/dev/null || true
           echo "release tree size: $(du -sh . | cut -f1)"
 
-      - name: Stamp version
+      - name: Read base version
         id: version
+        # version.h holds only the base; the "-tp.<N>" suffix is assigned at
+        # publish time (see the publish job) so two runs can never reuse an N.
         run: |
-          VERSION="$(date -u '+%Y.%m.%d')-${GITHUB_RUN_NUMBER}"
-          echo "#define SUNNYPILOT_VERSION \"$VERSION\"" > build/sunnypilot/common/version.h
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          cat build/sunnypilot/common/version.h
+          BASE="$(python3 ci/version base --repo-root build)"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "base version: $BASE"
 
       - name: Record panda/board/obj
         if: always()
@@ -230,7 +234,7 @@ jobs:
           compression-level: 0
 
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
       source_sha: ${{ steps.src.outputs.sha }}
 
   # ---- publish to staging-c3x-ci -------------------------------------------
@@ -239,9 +243,19 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # Every publish takes this lock, so the "-tp.<N>" assignment below (read
+    # existing ci/* tags -> next N -> push) is never raced by another run.
+    concurrency:
+      group: publish-staging-c3x-ci
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      - name: Checkout tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+
       - name: Download prebuilt artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -252,9 +266,25 @@ jobs:
           mkdir -p output
           tar xzf prebuilt.tar.gz -C output
 
-      - name: Publish
+      - name: Assign version
+        id: version
+        # N increments per base, derived from the ci/<base>-tp.<N> tags we push
+        # for each published build. Serialized by the concurrency group above.
+        run: |
+          set -euo pipefail
+          BASE="$(python3 ci/version base --repo-root output)"
+          TAGS="$(git ls-remote --tags origin 'refs/tags/ci/*' | cut -f2)"
+          VERSION="$(printf '%s\n' "$TAGS" | python3 ci/version next --repo-root output)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=ci/$VERSION" >> "$GITHUB_OUTPUT"
+          printf '#define SUNNYPILOT_VERSION "%s"\n' "$VERSION" > output/sunnypilot/common/version.h
+          echo "base=$BASE -> version=$VERSION (tag ci/$VERSION)"
+
+      - name: Publish + tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           cd output
@@ -268,12 +298,16 @@ jobs:
           if git ls-files -s | awk '$1 == "160000" { found = 1 } END { exit !found }'; then
             echo "ERROR: submodule gitlinks in release tree"; exit 1
           fi
-          git commit -q -m "chore(prebuilt): publish ${PUBLISH_BRANCH} ${{ needs.build.outputs.version }}
+          git commit -q -m "chore(prebuilt): publish ${PUBLISH_BRANCH} ${VERSION}
 
-          version: ${{ needs.build.outputs.version }}
+          version: ${VERSION}
           date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
           source: ${{ needs.build.outputs.source_sha }}
           source ref: ${SOURCE_REF}
           "
           git push -f origin "$PUBLISH_BRANCH"
           echo "published $PUBLISH_BRANCH @ $(git rev-parse HEAD)"
+          # Never reuse an N: a plain (non-forced) tag push fails if it exists.
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+          echo "tagged $TAG"
