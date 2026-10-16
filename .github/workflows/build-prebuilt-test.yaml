@@ -24,6 +24,10 @@ permissions:
   contents: read
   packages: read
 
+env:
+  # inputs.* is empty on the (temporary) push trigger, so default here.
+  IMAGE: ${{ inputs.image || 'ghcr.io/tjp507/openpilot-agnos-build:18.4' }}
+
 concurrency:
   group: build-prebuilt-test-${{ github.ref }}
   cancel-in-progress: true
@@ -58,7 +62,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull build image
-        run: docker pull --platform linux/arm64 "${{ inputs.image }}"
+        run: docker pull --platform linux/arm64 "$IMAGE"
 
       - name: Restore scons cache
         uses: actions/cache@v4
@@ -78,7 +82,7 @@ jobs:
             -e REPO_DIR=/work \
             -e BUILD_DIR=/work/build \
             -e SCONS_CACHE=/scons_cache \
-            "${{ inputs.image }}" \
+            "$IMAGE" \
             bash /work/ci/agnos/build-prebuilt.sh
 
       - name: Fix ownership for cache + artifact upload
