@@ -39,6 +39,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  PYTHONPATH: ${{ github.workspace }}
+  CI: "1"
   IMAGE: ${{ inputs.image || 'ghcr.io/tjp507/openpilot-agnos-build@sha256:dd5e91fbc27dad52286ea2a8616f6d6b511e8699d1433b1c72bde8409963cdea' }}
   SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
   PUBLISH_BRANCH: staging-c3x-ci
