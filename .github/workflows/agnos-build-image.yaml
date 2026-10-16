@@ -10,7 +10,9 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'ci/agnos/**'
+      - 'ci/agnos/Dockerfile'
+      - 'ci/agnos/fetch-agnos-rootfs.sh'
+      - 'ci/agnos/unsparse.py'
       - '.github/workflows/agnos-build-image.yaml'
 
 permissions:
