@@ -1,0 +1,91 @@
+name: promote-release
+
+# Promote a tested prebuilt commit to `staging-c3x` or `release-c3x`, and tag it.
+#
+#   staging-c3x-ci --promote--> staging-c3x --promote--> release-c3x
+#
+# The owner validates a `staging-c3x-ci` build on the device first. Promoting to
+# `release-c3x` requires the `production` GitHub environment (configure required
+# reviewers in repo settings) — it will wait for manual approval.
+#
+# This workflow does NOT build; it copies a commit that build-prebuilt.yaml
+# already produced.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch'
+        required: true
+        default: 'staging-c3x-ci'
+      source_commit:
+        description: 'Commit to promote (full sha)'
+        required: true
+      target_branch:
+        description: 'Target branch'
+        required: true
+        type: choice
+        options:
+          - staging-c3x
+          - release-c3x
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: promote to ${{ inputs.target_branch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # release-c3x requires the `production` environment (manual approval);
+    # staging-c3x uses a no-approval `staging` environment.
+    environment: ${{ inputs.target_branch == 'release-c3x' && 'production' || 'staging' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (tooling + credentials)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Validate the commit is on the source branch
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --depth 50 origin "$SOURCE_BRANCH"
+          git cat-file -e "${SOURCE_COMMIT}^{commit}" || { echo "unknown commit $SOURCE_COMMIT"; exit 1; }
+          if ! git merge-base --is-ancestor "$SOURCE_COMMIT" FETCH_HEAD; then
+            echo "ERROR: $SOURCE_COMMIT is not on $SOURCE_BRANCH"; exit 1
+          fi
+
+      - name: Resolve version
+        id: version
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          VERSION="$(git show "${SOURCE_COMMIT}:sunnypilot/common/version.h" | sed -n 's/.*"\(.*\)".*/\1/p')"
+          [ -n "$VERSION" ] || { echo "ERROR: could not read version"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "promoting $SOURCE_COMMIT as v$VERSION to ${{ inputs.target_branch }}"
+
+      - name: Copy commit to target branch
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          set -euo pipefail
+          git push -f origin "${SOURCE_COMMIT}:refs/heads/${TARGET_BRANCH}"
+          echo "pushed ${TARGET_BRANCH} -> ${SOURCE_COMMIT}"
+
+      - name: Tag v${{ steps.version.outputs.version }}
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git tag -f "v${{ steps.version.outputs.version }}" "$SOURCE_COMMIT"
+          git push -f origin "refs/tags/v${{ steps.version.outputs.version }}"
+          echo "tagged v${{ steps.version.outputs.version }}"

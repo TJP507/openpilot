@@ -3,6 +3,32 @@ import hashlib
 import opendbc
 import subprocess
 
+# --- Pinned panda firmware ---------------------------------------------------
+# Install the published (signed release) panda firmware instead of compiling it.
+# A source build produces a per-commit DEBUG image whose RSA signature changes
+# every build, causing pandad to re-flash the panda; that DEBUG firmware is the
+# suspected cause of the dev-only cellular regression. See
+# panda/board/pinned/SOURCE and ci/agnos/README.md.
+PINNED_DIR = Dir('#panda/board/pinned')
+PINNED_FILES = [
+  'panda_h7.bin.signed',
+  'bootstub.panda_h7.bin',
+  'body_h7.bin.signed',
+  'bootstub.body_h7.bin',
+  'panda_jungle_h7.bin.signed',
+  'bootstub.panda_jungle_h7.bin',
+  'cert.h',
+  'gitversion.h',
+  'version',
+]
+
+if all(PINNED_DIR.File(f).exists() for f in PINNED_FILES):
+  print("panda: installing pinned firmware from panda/board/pinned (skipping compile)")
+  for f in PINNED_FILES:
+    Command(f'board/obj/{f}', PINNED_DIR.File(f), 'cp -f $SOURCES $TARGET')
+  SConscript('tests/libpanda/SConscript')
+  Return()
+
 PREFIX = "arm-none-eabi-"
 BUILDER = "DEV"
 

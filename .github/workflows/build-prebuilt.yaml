@@ -1,0 +1,279 @@
+name: build-prebuilt
+
+# Release pipeline: build the `dev-c3x` source tree in the AGNOS build image,
+# strip it, stamp the version, and publish the prebuilt tree to `staging-c3x-ci`.
+#
+#   dev-c3x (source) --build--> staging-c3x-ci (prebuilt) --owner tests on device-->
+#   promote-release.yaml --> staging-c3x --> release-c3x
+#
+# Promotion (staging-c3x / release-c3x) is NOT done here — see promote-release.yaml.
+#
+# See ci/agnos/README.md for the full process.
+
+on:
+  push:
+    branches: [ dev-c3x ]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Source ref to build (dev-c3x)'
+        required: false
+        default: 'dev-c3x'
+      image:
+        description: 'Build image (pin by digest for reproducibility)'
+        required: false
+        default: 'ghcr.io/tjp507/openpilot-agnos-build@sha256:dd5e91fbc27dad52286ea2a8616f6d6b511e8699d1433b1c72bde8409963cdea'
+      scons_cache:
+        description: 'Reuse the scons cache (leave off for a true clean build)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-prebuilt-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+  CI: "1"
+  IMAGE: ${{ inputs.image || 'ghcr.io/tjp507/openpilot-agnos-build@sha256:dd5e91fbc27dad52286ea2a8616f6d6b511e8699d1433b1c72bde8409963cdea' }}
+  SOURCE_REF: ${{ inputs.source_ref || github.ref_name }}
+  PUBLISH_BRANCH: staging-c3x-ci
+
+jobs:
+  # ---- build-free test jobs (fail fast) ------------------------------------
+  lint:
+    name: lint
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .github/ci-requirements.txt
+      - run: ruff check sunnypilot selfdrive/ui/sunnypilot
+      - run: codespell sunnypilot selfdrive/ui/sunnypilot --ignore-words=.codespellignore
+
+  unit:
+    name: unit
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .github/ci-requirements.txt
+      - run: |
+          pytest -o addopts="" --confcutdir=sunnypilot -m "not slow and not tici" \
+            sunnypilot/mapd/tests/test_mapd_version.py \
+            sunnypilot/selfdrive/selfdrived/tests/test_button_state_tracker.py \
+            sunnypilot/webdashcam/tests
+
+  tylerpilot:
+    name: tylerpilot
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .github/ci-requirements.txt
+      - run: |
+          if [ ! -d sunnypilot/tylerpilot/tests ]; then
+            echo "no tylerpilot tests yet — skipping"
+            exit 0
+          fi
+          pytest -o addopts="" --confcutdir=sunnypilot sunnypilot/tylerpilot/tests
+
+  modem:
+    name: modem
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .github/ci-requirements.txt
+      - run: pytest -o addopts="" --confcutdir=system system/hardware/tici/tests/test_modem.py system/hardware/tici/tests/test_modem_format.py
+
+  webdashcam:
+    name: webdashcam
+    runs-on: [self-hosted, linux, x64, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .github/ci-requirements.txt
+      - run: pytest -o addopts="" --confcutdir=sunnypilot -m "not slow and not tici" sunnypilot/webdashcam/tests
+
+  # ---- build in the AGNOS image --------------------------------------------
+  build:
+    name: build + strip
+    needs: [ lint, unit, tylerpilot, modem, webdashcam ]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 1
+
+      - name: Resolve source sha
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull build image
+        run: docker pull --platform linux/arm64 "$IMAGE"
+
+      - name: Restore scons cache
+        if: ${{ inputs.scons_cache }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: scons_cache
+          key: scons-cache-${{ steps.src.outputs.sha }}
+          restore-keys: scons-cache-
+
+      - name: Build prebuilt tree (inside AGNOS image)
+        run: |
+          mkdir -p scons_cache
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$GITHUB_WORKSPACE/scons_cache:/scons_cache" \
+            -e REPO_DIR=/work \
+            -e BUILD_DIR=/work/build \
+            -e SCONS_CACHE=/scons_cache \
+            "$IMAGE" \
+            bash /work/ci/agnos/build-prebuilt.sh
+
+      - name: Fix ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build scons_cache 2>/dev/null || true
+
+      - name: Strip release tree
+        # Mirrors sunnypilot's strip list; also drops our CI files.
+        run: |
+          cd build
+          find . -name '*.a' -delete
+          find . -name '*.o' -delete
+          find . -name '*.os' -delete
+          find . -name '*.pyc' -delete
+          find . -name 'moc_*' -delete
+          find . -name '__pycache__' -type d -exec rm -rf {} +
+          find . -name 'SConstruct' -delete
+          find . -name 'SConscript' -delete
+          rm -rf .sconsign.dblite Jenkinsfile tools/release/ release/ ci/ tmp/
+          rm -f selfdrive/modeld/models/*.onnx*
+          rm -f sunnypilot/modeld*/models/*.onnx*
+          find third_party/ -name '*x86*' -exec rm -r {} + 2>/dev/null || true
+          find third_party/ -name '*Darwin*' -exec rm -r {} + 2>/dev/null || true
+          echo "release tree size: $(du -sh . | cut -f1)"
+
+      - name: Stamp version
+        id: version
+        run: |
+          VERSION="$(date -u '+%Y.%m.%d')-${GITHUB_RUN_NUMBER}"
+          echo "#define SUNNYPILOT_VERSION \"$VERSION\"" > build/sunnypilot/common/version.h
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cat build/sunnypilot/common/version.h
+
+      - name: Record panda/board/obj
+        if: always()
+        run: |
+          {
+            echo "### panda/board/obj"
+            echo '```'
+            ls -la build/panda/board/obj 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tar release tree
+        run: tar czf prebuilt.tar.gz -C build .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prebuilt
+          path: prebuilt.tar.gz
+          compression-level: 0
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      source_sha: ${{ steps.src.outputs.sha }}
+
+  # ---- publish to staging-c3x-ci -------------------------------------------
+  publish:
+    name: publish staging-c3x-ci
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: prebuilt
+
+      - name: Untar
+        run: |
+          mkdir -p output
+          tar xzf prebuilt.tar.gz -C output
+
+      - name: Publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd output
+          git init -q
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth 1 origin "$PUBLISH_BRANCH" || true
+          git checkout -q -b "$PUBLISH_BRANCH" 2>/dev/null || git checkout -q "$PUBLISH_BRANCH"
+          git add -f .
+          if git ls-files -s | awk '$1 == "160000" { found = 1 } END { exit !found }'; then
+            echo "ERROR: submodule gitlinks in release tree"; exit 1
+          fi
+          git commit -q -m "chore(prebuilt): publish ${PUBLISH_BRANCH} ${{ needs.build.outputs.version }}
+
+          version: ${{ needs.build.outputs.version }}
+          date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          source: ${{ needs.build.outputs.source_sha }}
+          source ref: ${SOURCE_REF}
+          "
+          git push -f origin "$PUBLISH_BRANCH"
+          echo "published $PUBLISH_BRANCH @ $(git rev-parse HEAD)"
