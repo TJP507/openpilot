@@ -1,0 +1,27 @@
+Pinned panda firmware
+=====================
+
+These files are the comma 3X panda firmware (H7) exactly as published on
+sunnypilot's prebuilt `staging-c3x` branch. They are installed verbatim into
+`panda/board/obj/` by `panda/SConscript` instead of being compiled.
+
+Source:    origin/staging-c3x
+Commit:    465accad0350169cd1fa80d7f78aa14f5cd8ba4e
+Commit msg: bump to v2026.002.029
+Vendored:  2026-10-16
+
+Why pinned
+----------
+Compiling the panda firmware from source produces a per-commit, DEBUG-signed
+image (`DEV-<short-commit>-DEBUG`, signed with `board/certs/debug`). Its RSA
+signature changes on every build, so `pandad` re-flashes the panda on every
+boot/update. The DEBUG source-built firmware is the suspected cause of the
+dev-only cellular regression: flashing it appears to disturb the modem.
+
+The pinned files are the exact signed release image the fleet runs, so `pandad`
+never re-flashes. `panda_h7.bin.signed` keeps the same trailing 128-byte
+signature block as the published release:
+
+    Panda.get_signature_from_firmware(panda_h7.bin.signed)[:8].hex() == "406de22bd6d19eca"
+
+`MANIFEST.sha256` records the sha256 of each file; `ci/agnos` verifies it.

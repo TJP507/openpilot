@@ -1,0 +1,147 @@
+# TylerPilot Cloud (device)
+
+Links a comma 3X to a TylerPilot server for stats and remote SSH.
+
+## Where it lives
+
+- `config.py` — link state, stored 0600 at `/data/community/tylerpilot.json`
+  (Params can't take new keys on this branch, so state is a file).
+- `client.py` — stdlib-only HTTPS client with **certificate pinning**. The
+  server cert fingerprint is captured on first registration (trust-on-first-use,
+  authorized by the pairing code) and verified on every later connection.
+- `agent.py` — background process `tylerpilotd`: heartbeat + 25s long-poll for
+  commands. Idles when not linked. Heartbeat is 15s on every link type.
+- `log.py` — TylerPilot-only log, capped at **50 MB** (see Logs below), and the
+  secret **redactor** used by both the log and the diagnostics bundle.
+- `settings_backup.py` — the settings allow/deny lists and the JSON backup
+  build/parse/diff/apply logic.
+- `../selfdrive/ui/.../settings/tylerpilot.py` — the Settings panel
+  (**Settings → Developer → TylerPilot Cloud**).
+
+## Linking
+
+1. Server web UI → **Link device** (or **Re-link**) → copy the code, shown as
+   `XXXX-XXXX-XXXX` (valid 10 min).
+2. On the device: **Settings → Developer → TylerPilot Cloud → Link**, type the
+   code (dashes and spaces are optional).
+3. The device registers over the pinned cert, sending its sshd host public keys
+   (`/etc/ssh/ssh_host_*.pub`) so the server can pin them, installs the server's
+   login key into `/home/comma/.ssh/authorized_keys`, and starts heartbeating.
+
+## Re-linking & revocation
+
+A **Re-link** from the web UI revokes the device's current key immediately: the
+old token is rejected (HTTP 401) and the device shows as *Awaiting re-link*
+until the new code is entered on the comma. A **single 401 is not treated as a
+revocation** — a proxy misroute or a server restore can 401 transiently, so the
+agent only confirms a revocation after **3 consecutive** of our own
+`unauthenticated` responses spanning **≥ 2 minutes** (any successful request
+resets the count). Until then it keeps the token and shows a
+`Server rejected this device's key (n/3)` error. On confirmation it drops the
+token (keeping host/port), removes the server's SSH login key, marks the link
+*revoked*, logs once, and backs off to a 60s idle — resuming automatically as
+soon as a new code is entered. The Settings panel then reads **"Disconnected
+from TylerPilot Cloud — enter a new code to re-link"** and shows the Link button
+(Unlink is hidden).
+
+## Server address
+
+Hardcoded for the PoC in `config.py`:
+
+```python
+DEFAULT_HOST = "pilot-connect.tylerjp.com"
+DEFAULT_PORT = 7448  # single port: device API + SSH-over-WebSocket tunnel
+```
+
+The reverse proxy SNI-routes `pilot-connect.tylerjp.com` on 7448 as raw TCP
+(no TLS termination, so the device still sees the pinned cert).
+
+## Logs
+
+TylerPilot keeps its own log, deliberately **separate from openpilot's swaglog**
+so it never touches sunnypilot's logs:
+
+- Path: `/data/community/tylerpilot.log`
+- Cap: **50 MB** — on overflow the file is trimmed down to its most recent half,
+  so total size stays under the cap without a hard stop.
+- Written by `log.py` (`info` / `warning` / `error`); the agent no longer sends
+  its messages to `cloudlog`.
+
+## Remote SSH (single port)
+
+The device talks to the server over **one port** (`DEFAULT_PORT`): the device API
+(register/heartbeat/poll) *and* the SSH tunnel. When an admin clicks **SSH** in
+the web UI, the server queues an `ssh_request` with a session id; the agent's
+next poll opens a **WebSocket** to `wss://<server>:<port>/api/v1/device/ssh-bridge`
+on that same port and bridges it to this device's sshd (`localhost:22`). The
+server dials the bridged stream with a Go SSH client and pipes a browser terminal
+through it. No separate SSH port or reverse `ssh -R` is needed, and the device
+keeps no tunnel key pair of its own: the server authenticates with its login key
+and pins this device's sshd host key (sent at link time) to fail closed on a
+changed key.
+
+## Remote actions
+
+The server can queue jobs that the agent picks up on the same long-poll (as
+`{"type":"job"}`) and runs via `actions.py`:
+
+- **Power** — `reboot`, `poweroff`. These report back to the server **before**
+  acting: the handler returns a deferred callable that the agent runs only after
+  the job result is posted.
+- **Update** — `update` (switch the git checkout to a TylerPilot channel, then
+  restart the manager via `launch_chffrplus.sh`'s flag-file loop).
+- **Telemetry** — `location`, `trips` (parsed locally; only the compact summary
+  is uploaded, never raw logs).
+- **Settings** — `backup`, `restore` (see below).
+- **Diagnostics** — `diagnostics` produces a support bundle (dmesg/journal/
+  network/ps/… + a swaglog tail). Every blob passes through the redactor in
+  `log.py`, so bearer tokens, keys, and other secrets never leave the device.
+
+`reboot`, `poweroff`, `update`, and a `restore` **apply** refuse to run while
+the device is driving ("Device is driving — try again when parked").
+
+Each handler returns `(ok, result, artifact?)` (plus the optional deferred
+callable above); the agent reports back with `POST /api/v1/device/job_result`,
+and the server stores any artifact for the web UI.
+
+## Settings backup & restore
+
+A backup is a small UTF-8 **JSON** document (`settings_backup.py`), not a
+tarball — restore only ever writes params through the Params API and never
+extracts files:
+
+```json
+{"format": "tylerpilot-settings", "version": 1,
+ "created_at": "<UTC ISO-8601 with Z>",
+ "source": {"device_id": "...", "dongle_id": "...", "name": "...",
+            "firmware_version": "...", "branch": "..."},
+ "params": {"Mads": true, "GsmApn": "internet", "CameraOffset": 0.5}}
+```
+
+- **Allowlist** — only an explicit set of `BACKUP`-flagged user settings is
+  captured (categories: Driving, Lateral, Longitudinal, Display, Recording,
+  Vehicle, Network). Values are JSON-native and match each param's declared
+  type.
+- **Denylist** — `BACKUP`-flagged keys that are credentials, identity,
+  security-sensitive, per-device calibration/state, caches, or one-shot
+  migration markers are refused (e.g. `GithubSshKeys`, `SecOCKey`,
+  `CarPlatformBundle`, `LiveDelay`, `ModelManager_ModelsCache`). Tokens, keys,
+  logs, and anything under `/data/community` are never included.
+- **Safety-gated toggles** — enabling a toggle that shows a safety dialog on the
+  device (Experimental Mode, the Toyota stop-and-go/enforce-stock toggles) is
+  skipped on restore so the notice isn't bypassed; Experimental Mode is allowed
+  once `ExperimentalModeConfirmed` is already true on this device.
+- **Restore is two-phase**: a **preview** (`dry_run`, the default) downloads and
+  validates the artifact and returns a per-key diff (change / same / skipped,
+  with a reason) without writing; an **apply** (`dry_run: false`) snapshots the
+  current settings into a `pre-restore-<UTC>.json` artifact, writes only the
+  "change" entries (blocking until each is on disk), and reports `{applied,
+  skipped, unchanged, failed: [{key, error}], reboot_recommended}`. A reboot is
+  recommended whenever anything changed.
+- Cross-device restore is allowed; the server warns using the backup's `source`.
+
+The allow/deny lists and declared types are asserted against
+`common/params_keys.h` by the tests, so an upstream change to a key or its
+`BACKUP` flag fails the suite.
+
+
