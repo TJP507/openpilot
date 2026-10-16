@@ -61,14 +61,24 @@ jobs:
             echo "ERROR: $SOURCE_COMMIT is not on $SOURCE_BRANCH"; exit 1
           fi
 
-      - name: Resolve version
+      - name: Resolve + validate version
         id: version
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
           VERSION="$(git show "${SOURCE_COMMIT}:sunnypilot/common/version.h" | sed -n 's/.*"\(.*\)".*/\1/p')"
-          [ -n "$VERSION" ] || { echo "ERROR: could not read version"; exit 1; }
+          [ -n "$VERSION" ] || { echo "ERROR: could not read version from $SOURCE_COMMIT"; exit 1; }
+          # Only a published CI build may be promoted: <base>-tp.<N>. A source
+          # build shows <base>-tp.dev; anything else is not a build we shipped.
+          if ! python3 ci/version check "$VERSION"; then
+            echo "ERROR: refusing to promote '$VERSION' — not a published <base>-tp.<N> (a source build shows -tp.dev)"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "ERROR: tag v$VERSION already exists — refusing to re-tag"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "promoting $SOURCE_COMMIT as v$VERSION to ${{ inputs.target_branch }}"
 
@@ -78,6 +88,8 @@ jobs:
           TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           set -euo pipefail
+          # The tested commit is copied byte-for-byte; the version string does
+          # not change on promotion.
           git push -f origin "${SOURCE_COMMIT}:refs/heads/${TARGET_BRANCH}"
           echo "pushed ${TARGET_BRANCH} -> ${SOURCE_COMMIT}"
 
@@ -86,6 +98,6 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          git tag -f "v${{ steps.version.outputs.version }}" "$SOURCE_COMMIT"
-          git push -f origin "refs/tags/v${{ steps.version.outputs.version }}"
+          git tag "v${{ steps.version.outputs.version }}" "$SOURCE_COMMIT"
+          git push origin "refs/tags/v${{ steps.version.outputs.version }}"
           echo "tagged v${{ steps.version.outputs.version }}"

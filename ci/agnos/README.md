@@ -22,6 +22,38 @@ promote-release.yaml -->  staging-c3x  -->  release-c3x
 Devices never compile. `staging-c3x-ci` is what the owner points the device at
 to validate a build before promotion.
 
+## Versioning
+
+`sunnypilot/common/version.h` holds **only the fork base** (e.g. `2026.002.029`).
+Every build appends a fork suffix to it:
+
+| build | version string | composed by |
+| --- | --- | --- |
+| on-device source (`dev-c3x`) | `<base>-tp.dev` | `system/version.py:get_version()` |
+| CI-published (`staging-c3x-ci`) | `<base>-tp.<N>` | `build-prebuilt.yaml` (publish job) |
+
+`N` starts at 1 and increments per base. It is derived from the
+`ci/<base>-tp.<N>` tags that the publish job pushes for each published build, so
+an `N` is never reused; the publish job holds the `publish-staging-c3x-ci`
+concurrency lock, so two runs cannot pick the same `N`. `promote-release.yaml`
+refuses to promote a commit whose `version.h` is `-tp.dev` or does not match
+`^\d{4}\.\d{3}\.\d{3}-tp\.\d+$`, and refuses to re-tag an existing `v<version>`.
+The promoted commit is copied unchanged — the version string never changes on
+promotion.
+
+The scheme is defined once, in `sunnypilot/common/version_scheme.py`, and shared
+by the runtime (`openpilot.system.version`) and the `ci/version` helper:
+
+```sh
+ci/version base          # 2026.002.029
+ci/version dev           # 2026.002.029-tp.dev
+git ls-remote --tags origin 'refs/tags/ci/*' | cut -f2 | ci/version next   # next N
+ci/version check 2026.002.029-tp.1   # exit 0 iff a published <base>-tp.<N>
+```
+
+Bumping the base (a sunnypilot sync) is just editing `version.h`; `N` restarts
+at 1 for the new base.
+
 ## Why the AGNOS `system` partition
 
 The build must run in the exact userland the device boots, or the artifacts
@@ -107,8 +139,8 @@ trailing 128 bytes) equals the pinned signature `406de22bd6d19eca…`.
 | workflow | trigger | does |
 | --- | --- | --- |
 | `agnos-build-image.yaml` | dispatch; `ci/agnos/{Dockerfile,fetch-agnos-rootfs.sh,unsparse.py}` change | builds + pushes `ghcr.io/tjp507/openpilot-agnos-build` |
-| `build-prebuilt.yaml` | push to `dev-c3x`; dispatch | tests → build in the pinned image → strip → version.h → publish `staging-c3x-ci` |
-| `promote-release.yaml` | dispatch | copy a tested commit to `staging-c3x`/`release-c3x` + tag `v<version>` (`production` env for release) |
+| `build-prebuilt.yaml` | push to `dev-c3x`; dispatch | tests → build in the pinned image → strip → assign `<base>-tp.<N>` → publish `staging-c3x-ci` + tag `ci/<base>-tp.<N>` |
+| `promote-release.yaml` | dispatch | copy a tested commit to `staging-c3x`/`release-c3x` + tag `v<version>` (guarded; `production` env for release) |
 
 All third-party actions are pinned to full commit SHAs; the build image is
 pinned by digest in `build-prebuilt.yaml`.
@@ -133,6 +165,7 @@ pkl.
 | `build-prebuilt.sh` | the in-container build (mirrors sunnypilot's build stage) |
 | `compare-prebuilt.sh` | diff a built tree against a published prebuilt tree |
 | `release_files.py` | vendored `tools/release/release_files.py` from sunnypilot `master`¹ |
+| `../version` | `ci/version` — compose/validate fork versions (shared with the runtime) |
 
 ¹ `dev-c3x` is derived from a prebuilt branch and does not carry
 `tools/release/`, so the tool is vendored here with a fork blacklist entry for

@@ -9,6 +9,7 @@ import subprocess
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.git import get_commit, get_origin, get_branch, get_short_branch, get_commit_date
+from openpilot.sunnypilot.common.version_scheme import resolve
 
 RELEASE_SP_BRANCHES = ['release-c3', 'release', 'release-tizi', 'release-tici', 'release-tizi-staging', 'release-tici-staging']
 TESTED_SP_BRANCHES = ['staging-c3', 'staging-c3-new', 'staging']
@@ -40,9 +41,15 @@ sunnylink_consent_declined: str = "-1"
 
 
 def get_version(path: str = BASEDIR) -> str:
+  """The fork version.
+
+  version.h holds only the base (e.g. "2026.002.029"); a source build is shown
+  as "<base>-tp.dev" and a published build already carries its "<base>-tp.<N>"
+  stamp. See sunnypilot/common/version_scheme.py.
+  """
   with open(os.path.join(path, "sunnypilot", "common", "version.h")) as _versionf:
     version = _versionf.read().split('"')[1]
-  return version
+  return resolve(version)
 
 
 def get_release_notes(path: str = BASEDIR) -> str:

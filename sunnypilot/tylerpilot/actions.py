@@ -178,11 +178,15 @@ def diagnostics(_payload: dict):
     "diag/df.txt": ["df", "-h"],
     "diag/ps.txt": ["ps", "aux"],
     "diag/git.txt": ["git", "-C", "/data/openpilot", "log", "-1", "--oneline"],
-    "diag/version.txt": ["cat", "/data/openpilot/sunnypilot/common/version.h"],
   }
   for name, args in cmds.items():
     _, out = _run(args, timeout=30)
     blobs[name] = log.redact_bytes(out.encode("utf-8", "replace"))
+
+  # The composed fork version (same as the UI and the heartbeat), not the raw
+  # version.h — that holds only the base (see sunnypilot/common/version_scheme.py).
+  from openpilot.system.version import get_version
+  blobs["diag/version.txt"] = log.redact_bytes(f"{get_version()}\n".encode("utf-8", "replace"))
 
   # newest swaglog tail
   try:
